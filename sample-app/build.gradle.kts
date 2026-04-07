@@ -59,5 +59,7 @@ dependencies {
     // ZXing 用于生成与扫二维码
     implementation("com.google.zxing:core:3.5.3")
     implementation("com.journeyapps:zxing-android-embedded:4.3.0")
+    // WebRTC — Stream 维护的现代封装（等同于 org.webrtc:google-webrtc，API 兼容 API 26+）
+    implementation("io.getstream:stream-webrtc-android:1.1.3")
 }
 

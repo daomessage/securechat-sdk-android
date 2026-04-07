@@ -26,6 +26,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -51,7 +52,8 @@ fun ChatScreen(
     client: SecureChatClient,
     friend: Friend,
     lifecycleScope: kotlinx.coroutines.CoroutineScope,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    onStartCall: ((toAliasId: String, enableVideo: Boolean) -> Unit)? = null
 ) {
     var messages by remember { mutableStateOf<List<StoredMessage>>(emptyList()) }
     var inputText by remember { mutableStateOf("") }
@@ -63,6 +65,7 @@ fun ChatScreen(
     var showVerifyDialog by remember { mutableStateOf(false) }
     var showAttachmentMenu by remember { mutableStateOf(false) }
     val context = LocalContext.current
+    val focusManager = LocalFocusManager.current
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
 
@@ -156,7 +159,12 @@ fun ChatScreen(
                 scope.launch { delay(3000); isFriendTyping = false }
             }
         }
-        onDispose { unsubMsg(); unsubStatus(); unsubTyping() }
+        onDispose {
+            // 修复 Compose isAttached crash：在节点 detach 前主动清除 IME 焦点
+            // 场景：通话来电导致 ChatScreen 被移除时，BasicTextField 仍持有焦点
+            focusManager.clearFocus(force = true)
+            unsubMsg(); unsubStatus(); unsubTyping()
+        }
     }
 
     if (showVerifyDialog) {
@@ -269,6 +277,22 @@ fun ChatScreen(
                 } else {
                     Text("🛡️", color = AmberWarn, fontSize = 16.sp)
                 }
+            }
+
+            // 📞 语音通话按钮
+            IconButton(
+                onClick = { onStartCall?.invoke(friend.aliasId, false) },
+                modifier = Modifier.size(36.dp)
+            ) {
+                Text("📞", fontSize = 18.sp)
+            }
+
+            // 📹 视频通话按钮
+            IconButton(
+                onClick = { onStartCall?.invoke(friend.aliasId, true) },
+                modifier = Modifier.size(36.dp)
+            ) {
+                Text("📹", fontSize = 18.sp)
             }
 
             // 右上角更多菜单
@@ -505,6 +529,12 @@ fun VerifySecurityDialog(
     var myKeys by remember { mutableStateOf<ByteArray?>(null) }
     var theirKeys by remember { mutableStateOf<ByteArray?>(null) }
     val scope = rememberCoroutineScope()
+    val focusManager = LocalFocusManager.current
+
+    // 修复：Dialog 关闭时 OutlinedTextField 仍可能持有焦点，需提前清除
+    DisposableEffect(Unit) {
+        onDispose { focusManager.clearFocus(force = true) }
+    }
 
     LaunchedEffect(friend.conversationId) {
         try {

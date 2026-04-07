@@ -32,6 +32,8 @@ class MessageManager(
     var onMessage: ((StoredMessage) -> Unit)? = null
     var onStatusChange: ((String, String) -> Unit)? = null // (msgId, status)
     var onTyping: ((String, String) -> Unit)? = null       // (fromAlias, convId)
+    /** 信令帧回调（通话/Call 模块使用），注入后接收所有 call_* 类型帧 */
+    var onSignal: ((Map<String, Any?>) -> Unit)? = null
 
     init {
         // 注册帧处理器
@@ -223,14 +225,16 @@ class MessageManager(
         val type = frame["type"] as? String ?: return
 
         when (type) {
-            "msg" -> handleMsg(frame)
-            "ack" -> handleAck(frame)
-            "delivered" -> handleReceiptByConvId(frame, "delivered")
-            "read" -> handleReceiptByConvId(frame, "read")
-            "status_change" -> handleStatusChange(frame)
-            "typing" -> handleTypingFrame(frame)
-            "retract" -> handleRetract(frame)
-            "goaway" -> transport.forceDisconnectGoaway(frame["reason"] as? String ?: "kicked_by_server")
+            "msg"          -> handleMsg(frame)
+            "ack"          -> handleAck(frame)
+            "delivered"    -> handleReceiptByConvId(frame, "delivered")
+            "read"         -> handleReceiptByConvId(frame, "read")
+            "status_change"-> handleStatusChange(frame)
+            "typing"       -> handleTypingFrame(frame)
+            "retract"      -> handleRetract(frame)
+            "goaway"       -> transport.forceDisconnectGoaway(frame["reason"] as? String ?: "kicked_by_server")
+            // ── 通话信令帧：透传给 CallManager 处理（不解密，直接路由）──
+            else           -> if (type.startsWith("call_")) onSignal?.invoke(frame)
         }
     }
 

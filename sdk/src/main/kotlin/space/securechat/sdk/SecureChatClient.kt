@@ -72,10 +72,12 @@ import space.securechat.sdk.vanity.VanityManager
 class SecureChatClient private constructor(private val context: Context) {
 
     companion object {
-        const val EVENT_MESSAGE = "message"
+        const val EVENT_MESSAGE      = "message"
         const val EVENT_STATUS_CHANGE = "status_change"
-        const val EVENT_TYPING = "typing"
+        const val EVENT_TYPING       = "typing"
         const val EVENT_NETWORK_STATE = "network_state"
+        /** 通话信令帧事件（除 EVENT_MESSAGE/TYPING 以外的所有 call_* 帧） */
+        const val EVENT_SIGNAL       = "call_signal"
 
         @Volatile private var instance: SecureChatClient? = null
 
@@ -153,8 +155,10 @@ class SecureChatClient private constructor(private val context: Context) {
     // ── 事件监听 ──────────────────────────────────────────────────────────
 
     private val messageListeners = mutableSetOf<(StoredMessage) -> Unit>()
-    private val statusListeners = mutableSetOf<(String, String) -> Unit>()
-    private val typingListeners = mutableSetOf<(String, String) -> Unit>()
+    private val statusListeners  = mutableSetOf<(String, String) -> Unit>()
+    private val typingListeners  = mutableSetOf<(String, String) -> Unit>()
+    /** 通话信令监听器（CallManager 注入） */
+    private val signalListeners  = mutableSetOf<(Map<String, Any?>) -> Unit>()
 
     init {
         messaging.onMessage = { msg ->
@@ -165,6 +169,10 @@ class SecureChatClient private constructor(private val context: Context) {
         }
         messaging.onTyping = { alias, convId ->
             scope.launch(Dispatchers.Main) { typingListeners.forEach { it(alias, convId) } }
+        }
+        // 信令帧分发到所有信令监听器
+        messaging.onSignal = { frame ->
+            scope.launch(Dispatchers.Main) { signalListeners.forEach { it(frame) } }
         }
     }
 
@@ -179,12 +187,58 @@ class SecureChatClient private constructor(private val context: Context) {
     @Suppress("UNCHECKED_CAST")
     fun <T> on(event: String, listener: T): () -> Unit {
         when (event) {
-            EVENT_MESSAGE -> { messageListeners.add(listener as (StoredMessage) -> Unit); return { messageListeners.remove(listener) } }
-            EVENT_STATUS_CHANGE -> { statusListeners.add(listener as (String, String) -> Unit); return { statusListeners.remove(listener) } }
-            EVENT_TYPING -> { typingListeners.add(listener as (String, String) -> Unit); return { typingListeners.remove(listener) } }
-            else -> return {}
+            EVENT_MESSAGE      -> { messageListeners.add(listener as (StoredMessage) -> Unit);        return { messageListeners.remove(listener) } }
+            EVENT_STATUS_CHANGE-> { statusListeners.add(listener as (String, String) -> Unit);        return { statusListeners.remove(listener) } }
+            EVENT_TYPING       -> { typingListeners.add(listener as (String, String) -> Unit);        return { typingListeners.remove(listener) } }
+            EVENT_SIGNAL       -> { signalListeners.add(listener as (Map<String, Any?>) -> Unit);     return { signalListeners.remove(listener) } }
+            else               -> return {}
         }
     }
+
+    /**
+     * 发送通话信令帧（CallManager 专用）
+     * 帧格式： Map<String, Any> 自动序列化为 JSON 后通过 WS 发出
+     * @return true=已立即发出，false=已入队（重连后自动发送）
+     */
+    fun sendSignalFrame(frame: Map<String, Any?>): Boolean {
+        val moshi = com.squareup.moshi.Moshi.Builder()
+            .addLast(com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory())
+            .build()
+        val json = moshi.adapter(Map::class.java).toJson(frame)
+        return transport.send(json)
+    }
+
+    /**
+     * 获取 TURN/STUN 服务器凭证（供 CallManager 初始化 PeerConnection）
+     * 调用 relay-server /relay/turn，返回 ICE 服务器列表
+     */
+    suspend fun fetchTurnConfig(): TurnConfig? {
+        return try {
+            // 确保已登录（token 由 OkHttp 拦截器自动注入 Authorization header）
+            http.getToken() ?: return null
+            val request = okhttp3.Request.Builder()
+                .url("${space.securechat.sdk.http.HttpClient.CORE_API_BASE}/api/v1/calls/ice-config")
+                .get()
+                .build()
+            val response = http.okhttpClient.newCall(request).execute()
+            if (!response.isSuccessful) return null
+            val body = response.body?.string() ?: return null
+            val moshi = com.squareup.moshi.Moshi.Builder()
+                .addLast(com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory())
+                .build()
+            @Suppress("UNCHECKED_CAST")
+            val map = moshi.adapter(Map::class.java).fromJson(body) as? Map<String, Any?> ?: return null
+            @Suppress("UNCHECKED_CAST")
+            val servers = map["ice_servers"] as? List<Map<String, Any?>> ?: return null
+            TurnConfig(servers)
+        } catch (e: Exception) {
+            android.util.Log.w("SecureChatClient", "fetchTurnConfig 失败，降级为 STUN", e)
+            null
+        }
+    }
+
+    /** TURN 配置数据类 */
+    data class TurnConfig(val iceServers: List<Map<String, Any?>>)
 
     // ── 连接控制 ──────────────────────────────────────────────────────────
 
