@@ -24,7 +24,6 @@ class WSTransport(
 ) {
 
     companion object {
-        private const val WS_URL = "wss://api.webtool.space/ws"
         private val BASE_DELAY_MS = longArrayOf(1000, 2000, 4000, 8000, 16000, 30000, 60000, 120000)
     }
 
@@ -91,8 +90,9 @@ class WSTransport(
     private fun doConnect(uuid: String, token: String) {
         _networkState.value = NetworkState.Connecting
 
+        val wsUrl = HttpClient.CORE_API_BASE.replace("^http".toRegex(), "ws") + "/ws"
         val request = Request.Builder()
-            .url("$WS_URL?user_uuid=$uuid&token=$token")
+            .url("$wsUrl?user_uuid=$uuid&token=$token")
             .build()
 
         ws = http.okhttpClient.newWebSocket(request, object : WebSocketListener() {

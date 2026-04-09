@@ -22,7 +22,7 @@ import java.util.concurrent.atomic.AtomicReference
 class HttpClient {
 
     companion object {
-        const val CORE_API_BASE = "https://api.webtool.space"
+        const val CORE_API_BASE = "https://relay.daomessage.com"
     }
 
     private val tokenRef = AtomicReference<String?>()

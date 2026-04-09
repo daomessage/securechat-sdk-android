@@ -25,6 +25,36 @@ android {
     }
     kotlinOptions { jvmTarget = "17" }
 
+    signingConfigs {
+        // 如果根目录存在 release.keystore 则用正式签名，否则复用 debug 签名
+        // 上架 Google Play 时请替换为正式 keystore 并配置 keystore.properties
+        create("release") {
+            val releaseStore = rootProject.file("release.keystore")
+            if (releaseStore.exists()) {
+                storeFile = releaseStore
+                storePassword = project.findProperty("RELEASE_STORE_PASSWORD") as? String ?: ""
+                keyAlias = project.findProperty("RELEASE_KEY_ALIAS") as? String ?: ""
+                keyPassword = project.findProperty("RELEASE_KEY_PASSWORD") as? String ?: ""
+            } else {
+                // Fallback: 复用 debug 签名，方便开发阶段直接打 release 包
+                storeFile = getByName("debug").storeFile
+                storePassword = getByName("debug").storePassword
+                keyAlias = getByName("debug").keyAlias
+                keyPassword = getByName("debug").keyPassword
+            }
+        }
+    }
+
+    buildTypes {
+        getByName("debug") {
+            isMinifyEnabled = false
+        }
+        getByName("release") {
+            isMinifyEnabled = false  // TODO: 上架前改为 true 并配置 proguard-rules.pro
+            signingConfig = signingConfigs.getByName("release")
+        }
+    }
+
     packaging {
         resources {
             excludes += setOf(

@@ -1,15 +1,20 @@
 # SecureChat Android SDK
 
-> 对标 `@chat/sdk`（TypeScript 版），与现有 Web/PWA 客户端完全互通的端到端加密 IM SDK
+[English](./README.md) | [简体中文](./README_zh-CN.md)
+![License](https://img.shields.io/badge/license-MIT-blue.svg)
+![Platform](https://img.shields.io/badge/platform-Android-green.svg)
+![Language](https://img.shields.io/badge/language-Kotlin-purple.svg)
+
+> Aligned with `@daomessage_sdk/sdk` (TypeScript), providing native End-to-End Encrypted (E2EE) messaging fully interoperable with existing Web/PWA clients.
 
 ---
 
-## 快速开始（AI Vibecoding 接入）
+## Quick Start (AI Vibecoding Integration)
 
-### 1. 添加依赖
+### 1. Add Dependencies
 
 ```kotlin
-// settings.gradle.kts（monorepo 本地依赖）
+// settings.gradle.kts (monorepo local dependency)
 includeBuild("../sdk-android")
 
 // app/build.gradle.kts
@@ -18,50 +23,50 @@ dependencies {
 }
 ```
 
-### 2. Application 初始化
+### 2. Application Initialization
 
 ```kotlin
 class MyApp : Application() {
     override fun onCreate() {
         super.onCreate()
-        // 🔒 SDK 自动：建 Room DB、初始化 HttpClient、BouncyCastle
+        // 🔒 SDK automatically builds Room DB instances and internal BouncyCastle chains
         SecureChatClient.init(this)
     }
 }
 ```
 
-### 3. 完整注册流程（Activity/Fragment）
+### 3. Full Registration Flow (Activity/Fragment)
 
 ```kotlin
 val client = SecureChatClient.getInstance()
 
-// Step 1: 生成助记词（展示给用户, 要求备份）
+// Step 1: Generate Mnemonic (Display to user & require backup completion)
 val mnemonic = KeyDerivation.newMnemonic()
 showMnemonicToUser(mnemonic)
 
-// Step 2: 用户确认备份后，注册
+// Step 2: Register account
 lifecycleScope.launch {
     val aliasId = client.auth.registerAccount(mnemonic, nickname = "Alice")
-    // SDK 自动完成：PoW → 密钥派生 → 注册 → JWT
+    // SDK Magic: PoW computation → Key Derivation → Registration → JWT Provision
 
-    // Step 3: 连接 WebSocket
+    // Step 3: Connect WebSocket Transport
     client.connect()
 
-    // Step 4: 同步好友（建立 ECDH 会话）
+    // Step 4: Sync friends infrastructure (Initiates implicit ECDH flows)
     val friends = client.contacts.syncFriends()
 
-    // Step 5: 进入主界面
+    // Step 5: Navigate to Home Dashboard
     navigateToMain(aliasId, friends)
 }
 ```
 
-### 4. 恢复会话（App 每次启动）
+### 4. Session Restoration (App Launch Recovery)
 
 ```kotlin
 lifecycleScope.launch {
     val session = client.restoreSession()
     if (session == null) {
-        navigateToWelcome()    // 首次使用 → 注册流程
+        navigateToWelcome()    // First launch or wiped local credentials -> Registration
     } else {
         val (aliasId, nickname) = session
         client.connect()
@@ -71,80 +76,80 @@ lifecycleScope.launch {
 }
 ```
 
-### 5. 消息收发
+### 5. Send & Receive
 
 ```kotlin
-// 接收（在 onStart 中注册，onStop 中注销）
+// Receiving Messages (Register in onStart, Deregister in onStop)
 val unsub = client.on(SecureChatClient.EVENT_MESSAGE) { msg: StoredMessage ->
-    // 主线程回调，直接更新 RecyclerView
+    // Automatically executes on the Main Thread for immediate RecyclerView updates
     adapter.addMessage(msg)
 }
 // onStop: unsub()
 
-// 发送
+// Transmitting encoded message payload
 lifecycleScope.launch {
     val msgId = client.sendMessage(conversationId, toAliasId, "Hello E2EE!")
 }
 
-// 发送 typing
+// Emitting typing broadcast indication
 client.sendTyping(conversationId, toAliasId)
 
-// 标记已读
+// Triggering read execution sequences 
 client.markAsRead(conversationId, maxSeq, toAliasId)
 ```
 
-### 6. 退出登录
+### 6. Graceful Logout
 
 ```kotlin
 lifecycleScope.launch {
-    client.logout()  // disconnect + 清 Room DB + 清 JWT
+    client.logout()  // Drops socket + Drops Room DB schemas + Flushes JWT payload state
     navigateToWelcome()
 }
 ```
 
 ---
 
-## 模块 API 参考
+## API Reference by Manager
 
-### `client.auth`（AuthManager）
+### `client.auth` (AuthManager)
 
-| 方法 | 说明 |
+| Function | Operation |
 |------|------|
-| `registerAccount(mnemonic, nickname)` | 注册新账号（PoW + 密钥派生 + JWT）|
-| `restoreSession()` | 恢复老账号（返回 (aliasId, nickname) 或 null）|
+| `registerAccount(mnemonic, nickname)` | Sign-in (PoW + Identity derivation + JWT minting) |
+| `restoreSession()` | Wake previous identity configs (returns (aliasId, nickname) or null) |
 
-### `client.contacts`（ContactsManager）
+### `client.contacts` (ContactsManager)
 
-| 方法 | 说明 |
+| Function | Operation |
 |------|------|
-| `lookupUser(aliasId)` | 搜索用户（添加好友前的查询）|
-| `sendFriendRequest(aliasId)` | 发送好友申请 |
-| `acceptFriendRequest(friendshipId)` | 接受好友申请 |
-| `syncFriends()` | 同步全部好友 + 自动建立 ECDH 会话 |
+| `lookupUser(aliasId)` | Identity search mechanism |
+| `sendFriendRequest(aliasId)` | Initiate connection stream block |
+| `acceptFriendRequest(friendshipId)` | Fulfill connection stream block |
+| `syncFriends()` | Polling fallback for fetching networks & constructing ECDH keys |
 
-### `client.channels`（ChannelsManager）
+### `client.channels` (ChannelsManager)
 
-| 方法 | 说明 |
+| Function | Operation |
 |------|------|
-| `getMine()` | 获取已订阅频道 |
-| `search(query)` | 搜索频道 |
-| `create(name, description)` | 创建频道 |
-| `post(channelId, content)` | 发帖 |
-| `subscribe(channelId)` | 订阅 |
-| `unsubscribe(channelId)` | 取消订阅 |
+| `getMine()` | Fetch subscribed boards |
+| `search(query)` | Search directory |
+| `create(name, description)` | Init public channel identity signature |
+| `post(channelId, content)` | Publish payload |
+| `subscribe(channelId)` | Subscribe identity signature mechanism |
+| `unsubscribe(channelId)` | Revoke identity mapping bind |
 
-### `client.vanity`（VanityManager）
+### `client.vanity` (VanityManager)
 
-| 方法 | 说明 |
+| Function | Operation |
 |------|------|
-| `search(query)` | 搜索可用靓号 |
-| `purchase(aliasId)` | 购买靓号（返回支付链接）|
-| `bind(orderId)` | 绑定靓号（支付后调用）|
+| `search(query)` | Enumerate unassigned special alias blocks |
+| `purchase(aliasId)` | Allocate order node routing |
+| `bind(orderId)` | Assign successfully negotiated node block payload |
 
-### `client.push`（PushManager）
+### `client.push` (PushManager)
 
 ```kotlin
-// 在 FirebaseMessagingService.onNewToken() 中调用
+// Called dynamically inside FirebaseMessagingService.onNewToken() implementations
 lifecycleScope.launch {
     client.push.register(fcmToken)
 }
@@ -152,25 +157,25 @@ lifecycleScope.launch {
 
 ---
 
-## 协议约束（🛡️ AI 不得修改）
+## Protocol Engine Directives (🛡️ DO NOT MODIFY)
 
-| 约束项 | 值 |
+| Parameter Rule | Value |
 |-------|-----|
-| API 服务端地址 | `https://api.webtool.space` |
-| Ed25519 派生路径 | `m/44'/0'/0'/0/0` (SLIP-0010 硬化) |
-| X25519 派生路径 | `m/44'/1'/0'/0/0` (SLIP-0010 硬化) |
-| HMAC key（派生根节点） | `"ed25519 seed"` |
-| AES-GCM 信封格式 | `iv(12B) + ciphertext + tag(16B)` |
-| HKDF salt | `SHA-256(conv_id)` |
-| HKDF info | `"securechat-session-v1"` |
+| Root API Address Block | `https://relay.daomessage.com` |
+| Ed25519 Key Derivation Template | `m/44'/0'/0'/0/0` (SLIP-0010 Hardened spec compliance) |
+| X25519 Key Derivation Template  | `m/44'/1'/0'/0/0` (SLIP-0010 Hardened spec compliance) |
+| HMAC Root Instantiation Target | `"ed25519 seed"` |
+| AES-GCM Structure Definition | `iv(12B) + ciphertext + tag(16B)` |
+| HKDF Salt Vector | `SHA-256(conv_id)` |
+| HKDF Info Vector | `"securechat-session-v1"` |
 
 ---
 
-## 技术栈
+## Technical Stack Architecture
 
-- Kotlin + 协程（`suspend fun` 函数，无回调地狱）
-- Room 数据库（消息/会话/身份持久化）
-- OkHttp WebSocket（重连心跳，指数退避）  
-- Bouncy Castle（Ed25519 / X25519 / AES-256-GCM / HKDF）
-- Retrofit2（REST API）
-- FCM（推送，对标 Web Push）
+- Kotlin + Coroutine Suspend Dispatch (`suspend fun` structures overriding callback hell architectures)
+- Room Database (Isolated SQLite wrappers for E2EE context state maintenance)
+- OkHttp WebSockets (Heartbeat + Exponential Backoff algorithms incorporated)  
+- Bouncy Castle API Core (Ed25519 / X25519 / AES-256-GCM / HKDF cryptographic dependencies)
+- Retrofit2 (REST API generation layer framework wrapper)
+- Google FCM (Server broadcast pushes equivalent to generic Web Push)
