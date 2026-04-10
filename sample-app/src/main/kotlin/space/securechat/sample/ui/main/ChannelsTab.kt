@@ -23,6 +23,7 @@ import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.launch
 import space.securechat.sdk.SecureChatClient
 import space.securechat.sdk.channels.ChannelInfo
+import space.securechat.sdk.channels.ChannelTradeOrder
 import space.securechat.sdk.http.ChannelPost
 import space.securechat.sample.ui.theme.*
 import space.securechat.sample.ui.FormatUtils.formatMsgTime
@@ -89,7 +90,17 @@ fun ChannelsTabContent(client: SecureChatClient, lifecycleScope: kotlinx.corouti
                                         channels = client.channels.getMine()
                                         showCreateDialog = false
                                     } catch (e: Exception) {
-                                        Toast.makeText(context, "创建失败: ${e.message}", Toast.LENGTH_SHORT).show()
+                                        val err = e.message ?: ""
+                                        if (err.contains("QUOTA_EXCEEDED")) {
+                                            try {
+                                                val order = client.channels.buyQuota()
+                                                Toast.makeText(context, "配额上限！请向 ${order.payTo} 支付补充配额", Toast.LENGTH_LONG).show()
+                                            } catch (ex: Exception) {
+                                                Toast.makeText(context, "获取配额订单失败: ${ex.message}", Toast.LENGTH_SHORT).show()
+                                            }
+                                        } else {
+                                            Toast.makeText(context, "创建失败: $err", Toast.LENGTH_SHORT).show()
+                                        }
                                     } finally { isCreating = false }
                                 }
                             }
@@ -144,7 +155,18 @@ fun ChannelsTabContent(client: SecureChatClient, lifecycleScope: kotlinx.corouti
                         Box(Modifier.size(44.dp).background(BlueAccent, RoundedCornerShape(8.dp)),
                             contentAlignment = Alignment.Center) { Text("📢", fontSize = 20.sp) }
                         Column(Modifier.weight(1f)) {
-                            Text(ch.name, color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Medium)
+                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                Text(ch.name, color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Medium)
+                                if (ch.forSale == true) {
+                                    Text(
+                                        "🏷 ${ch.salePrice?.toInt() ?: "?"} USDT",
+                                        color = Color(0xFFFBBF24),
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        modifier = Modifier.background(Color(0x26F59E0B), RoundedCornerShape(4.dp)).padding(horizontal = 6.dp, vertical = 2.dp)
+                                    )
+                                }
+                            }
                             Text(ch.description, color = ZincText, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
                         if (ch.isSubscribed == true) Text("已订阅", color = GreenOk, fontSize = 12.sp)
@@ -166,17 +188,33 @@ fun ChannelDetailView(
     var posts by remember { mutableStateOf<List<ChannelPost>>(emptyList()) }
     var postText by remember { mutableStateOf("") }
     var isSubscribed by remember { mutableStateOf(channel.isSubscribed == true) }
+    var channelDetail by remember { mutableStateOf(channel) }
+    var showListForSale by remember { mutableStateOf(false) }
+    var tradeOrder by remember { mutableStateOf<ChannelTradeOrder?>(null) }
+    var isBuying by remember { mutableStateOf(false) }
     val context = LocalContext.current
 
     LaunchedEffect(channel.id) {
-        try { posts = client.channels.getPosts(channel.id) } catch (_: Exception) {}
+        try {
+            posts = client.channels.getPosts(channel.id)
+            channelDetail = client.channels.getDetail(channel.id)
+        } catch (_: Exception) {}
     }
 
     Column(Modifier.fillMaxSize().background(DarkBg)) {
+        // 顶部导航
         Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             TextButton(onClick = onBack) { Text("← 返回", color = ZincText) }
-            Text(channel.name, color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+            Column(Modifier.weight(1f)) {
+                Text(channelDetail.name, color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                if (channelDetail.forSale == true) {
+                    Text(
+                        "🏷 出售中 · ${channelDetail.salePrice?.toInt()} USDT",
+                        color = Color(0xFFFBBF24), fontSize = 11.sp, fontWeight = FontWeight.SemiBold
+                    )
+                }
+            }
             Button(
                 onClick = {
                     lifecycleScope.launch {
@@ -192,6 +230,7 @@ fun ChannelDetailView(
         }
         Divider(color = DividerColor)
 
+        // 帖子列表
         LazyColumn(Modifier.weight(1f).padding(horizontal = 12.dp)) {
             items(posts) { post ->
                 Column(Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
@@ -205,30 +244,175 @@ fun ChannelDetailView(
             }
         }
 
-        if (channel.role == "admin" || channel.role == "owner") {
-            Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedTextField(
-                    value = postText, onValueChange = { postText = it },
-                    placeholder = { Text("发布内容...", color = ZincText) },
-                    colors = OutlinedTextFieldDefaults.colors(focusedTextColor = Color.White, unfocusedTextColor = Color.White),
-                    modifier = Modifier.weight(1f), singleLine = true
-                )
+        // 底部操作区
+        Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            // Owner: 发帖
+            if (channelDetail.role == "admin" || channelDetail.role == "owner") {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value = postText, onValueChange = { postText = it },
+                        placeholder = { Text("发布内容...", color = ZincText) },
+                        colors = OutlinedTextFieldDefaults.colors(focusedTextColor = Color.White, unfocusedTextColor = Color.White),
+                        modifier = Modifier.weight(1f), singleLine = true
+                    )
+                    Button(
+                        onClick = {
+                            val content = postText.trim(); if (content.isEmpty()) return@Button
+                            postText = ""
+                            lifecycleScope.launch {
+                                try {
+                                    client.channels.post(channel.id, content)
+                                    posts = client.channels.getPosts(channel.id)
+                                } catch (e: Exception) { Toast.makeText(context, "发布失败: ${e.message}", Toast.LENGTH_SHORT).show() }
+                            }
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = BlueAccent),
+                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 12.dp)
+                    ) { Text("发布") }
+                }
+            }
+
+            // Owner: 挂牌出售按钮
+            if (channelDetail.role == "owner" && channelDetail.forSale != true) {
+                Button(
+                    onClick = { showListForSale = true },
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF92400E)),
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text("🏷 挂牌出售此频道") }
+            }
+
+            // 买家: 购买按钮
+            if (channelDetail.forSale == true && channelDetail.role != "owner") {
                 Button(
                     onClick = {
-                        val content = postText.trim(); if (content.isEmpty()) return@Button
-                        postText = ""
+                        isBuying = true
                         lifecycleScope.launch {
                             try {
-                                client.channels.post(channel.id, content)
-                                posts = client.channels.getPosts(channel.id)
-                            } catch (e: Exception) { Toast.makeText(context, "发布失败: ${e.message}", Toast.LENGTH_SHORT).show() }
+                                val order = client.channels.buyChannel(channel.id)
+                                tradeOrder = order
+                            } catch (e: Exception) {
+                                Toast.makeText(context, "购买失败: ${e.message}", Toast.LENGTH_SHORT).show()
+                            } finally { isBuying = false }
                         }
                     },
-                    colors = ButtonDefaults.buttonColors(containerColor = BlueAccent),
-                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 12.dp)
-                ) { Text("发布") }
+                    enabled = !isBuying,
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF059669)),
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text(if (isBuying) "正在生成订单..." else "💰 购买此频道 · ${channelDetail.salePrice?.toInt()} USDT") }
             }
         }
+    }
+
+    // 挂牌出售对话框
+    if (showListForSale) {
+        var priceInput by remember { mutableStateOf("") }
+        var isListing by remember { mutableStateOf(false) }
+        AlertDialog(
+            onDismissRequest = { if (!isListing) showListForSale = false },
+            containerColor = SurfaceBg,
+            title = { Text("挂牌出售", color = Color.White) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("频道: ${channelDetail.name}", color = ZincText, fontSize = 13.sp)
+                    Text("⚠️ 交易完成后频道所有权将自动转移给买家", color = Color(0xFFFBBF24), fontSize = 12.sp)
+                    OutlinedTextField(
+                        value = priceInput, onValueChange = { priceInput = it.filter { c -> c.isDigit() } },
+                        label = { Text("售价 (USDT)", color = ZincText) },
+                        colors = OutlinedTextFieldDefaults.colors(focusedTextColor = Color.White, unfocusedTextColor = Color.White),
+                        singleLine = true
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val price = priceInput.toIntOrNull() ?: return@Button
+                        if (price <= 0) return@Button
+                        isListing = true
+                        lifecycleScope.launch {
+                            try {
+                                client.channels.listForSale(channel.id, price)
+                                channelDetail = client.channels.getDetail(channel.id)
+                                showListForSale = false
+                                Toast.makeText(context, "挂牌成功！", Toast.LENGTH_SHORT).show()
+                            } catch (e: Exception) {
+                                Toast.makeText(context, "挂牌失败: ${e.message}", Toast.LENGTH_SHORT).show()
+                            } finally { isListing = false }
+                        }
+                    },
+                    enabled = !isListing && (priceInput.toIntOrNull() ?: 0) > 0,
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFD97706))
+                ) { Text(if (isListing) "提交中..." else "确认挂牌") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showListForSale = false }, enabled = !isListing) { Text("取消", color = ZincText) }
+            }
+        )
+    }
+
+    // 购买支付弹窗
+    if (tradeOrder != null) {
+        val order = tradeOrder!!
+        var isPolling by remember { mutableStateOf(false) }
+        var pollStatus by remember { mutableStateOf("") }
+        AlertDialog(
+            onDismissRequest = { if (!isPolling) tradeOrder = null },
+            containerColor = SurfaceBg,
+            title = { Text("购买频道", color = Color.White) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("频道: ${channelDetail.name}", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                    Text("金额: ${order.priceUsdt.toInt()} USDT", color = Color(0xFFFBBF24), fontSize = 14.sp)
+                    Divider(color = DividerColor)
+                    Text("TRON (TRC-20) 收款地址:", color = ZincText, fontSize = 11.sp)
+                    Text(order.payTo, color = Color.White, fontSize = 12.sp,
+                        modifier = Modifier.clickable {
+                            val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                            cm.setPrimaryClip(ClipData.newPlainText("address", order.payTo))
+                            Toast.makeText(context, "地址已复制", Toast.LENGTH_SHORT).show()
+                        }.background(Color(0xFF1C1C1E), RoundedCornerShape(8.dp)).padding(8.dp)
+                    )
+                    Text("请向此地址转入 ${order.priceUsdt.toInt()} USDT", color = ZincText, fontSize = 11.sp)
+                    if (pollStatus.isNotEmpty()) {
+                        Text(pollStatus, color = if (pollStatus.contains("失败") || pollStatus.contains("过期")) Color.Red else Color(0xFF34D399), fontSize = 12.sp)
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        isPolling = true
+                        pollStatus = "正在确认链上支付..."
+                        lifecycleScope.launch {
+                            repeat(60) {
+                                try {
+                                    val status = client.vanity.orderStatus(order.orderId)
+                                    if (status == "confirmed") {
+                                        pollStatus = "✅ 支付确认！频道已转移"
+                                        channelDetail = client.channels.getDetail(channel.id)
+                                        kotlinx.coroutines.delay(1500)
+                                        tradeOrder = null
+                                        return@launch
+                                    } else if (status == "expired") {
+                                        pollStatus = "❌ 订单已过期"
+                                        isPolling = false
+                                        return@launch
+                                    }
+                                } catch (_: Exception) {}
+                                kotlinx.coroutines.delay(3000)
+                            }
+                            pollStatus = "确认超时，请稍后重试"
+                            isPolling = false
+                        }
+                    },
+                    enabled = !isPolling,
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF059669))
+                ) { Text(if (isPolling) "确认中..." else "我已付款") }
+            },
+            dismissButton = {
+                TextButton(onClick = { tradeOrder = null }, enabled = !isPolling) { Text("取消", color = ZincText) }
+            }
+        )
     }
 }

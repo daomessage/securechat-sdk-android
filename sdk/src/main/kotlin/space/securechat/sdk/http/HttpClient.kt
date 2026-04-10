@@ -113,6 +113,9 @@ interface ApiService {
     @POST("api/v1/channels")
     suspend fun createChannel(@Body body: CreateChannelRequest): CreateChannelResponse
 
+    @POST("api/v1/channels/quota/buy")
+    suspend fun buyQuota(@Body body: Map<String, String> = emptyMap()): ChannelTradeOrderResponse
+
     @GET("api/v1/channels/{id}")
     suspend fun getChannelDetail(@Path("id") id: String): ChannelInfo
 
@@ -128,12 +131,25 @@ interface ApiService {
     @DELETE("api/v1/channels/{id}/subscribe")
     suspend fun unsubscribeChannel(@Path("id") id: String): Unit
 
-    // ── 靓号 ────────────────────────────────────────────────────────
+    // ── 频道交易 ──────────────────────────────────────────────────────
+    @POST("api/v1/vanity/list-channel")
+    suspend fun listChannelForSale(@Body body: ListChannelRequest): Unit
+
+    @POST("api/v1/channels/{id}/buy")
+    suspend fun buyChannel(@Path("id") id: String, @Body body: Map<String, String> = emptyMap()): ChannelTradeOrderResponse
+
+    // ── 靓号（V1.3 规则引擎版：后端实时评估等级和价格，直接返回数组）──
     @GET("api/v1/vanity/search")
-    suspend fun searchVanity(@Query("q") query: String): VanitySearchResponse
+    suspend fun searchVanity(@Query("q") query: String): List<VanityItemResponse>
 
     @POST("api/v1/vanity/purchase")
     suspend fun purchaseVanity(@Body body: VanityPurchaseRequest): VanityPurchaseResponse
+
+    @POST("api/v1/vanity/reserve")
+    suspend fun reserveVanity(@Body body: VanityReserveRequest): VanityReserveResponse
+
+    @GET("api/v1/vanity/order/{orderId}/status")
+    suspend fun getOrderStatus(@Path("orderId") orderId: String): OrderStatusResponse
 
     @POST("api/v1/vanity/bind")
     suspend fun bindVanity(@Body body: VanityBindRequest): VanityBindResponse
@@ -199,7 +215,6 @@ data class DownloadUrlResponse(val download_url: String)
 
 data class ChannelInfo(
     val id: String,
-    val alias_id: String? = null,
     val name: String,
     val description: String,
     val role: String? = null,
@@ -219,8 +234,14 @@ data class ChannelPost(
 data class ChannelPostRequest(val content: String, val type: String = "text")
 data class ChannelPostResponse(val post_id: String)
 
-data class VanitySearchResponse(val items: List<VanityItem>)
-data class VanityItem(val alias_id: String, val price_usdt: Double, val status: String)
+/** 靓号搜索响应项（snake_case，与后端 JSON 一致）
+ *  V1.3 规则引擎版：tier 为 top/premium/standard */
+data class VanityItemResponse(
+    val alias_id: String,
+    val price_usdt: Int,
+    val tier: String,
+    val is_featured: Boolean
+)
 data class VanityPurchaseRequest(val alias_id: String)
 data class VanityPurchaseResponse(
     val order_id: String,
@@ -236,3 +257,23 @@ data class PushRegisterRequest(
     val token: String,       // FCM token
     val platform: String = "android"
 )
+
+// ── 频道交易 ─────────────────────────────────────────────────────────
+data class ListChannelRequest(val channel_id: String, val price_usdt: Int)
+data class ChannelTradeOrderResponse(
+    val order_id: String,
+    val price_usdt: Double,
+    val pay_to: String,
+    val expired_at: String
+)
+
+// ── 靓号补充 ─────────────────────────────────────────────────────────
+data class VanityReserveRequest(val alias_id: String)
+data class VanityReserveResponse(
+    val order_id: String,
+    val alias_id: String,
+    val price: Double,
+    val pay_to: String,
+    val expired_at: String
+)
+data class OrderStatusResponse(val status: String)  // PENDING | confirmed | expired

@@ -132,19 +132,26 @@ lifecycleScope.launch {
 | 方法 | 说明 |
 |------|------|
 | `getMine()` | 获取已订阅频道 |
-| `search(query)` | 搜索频道 |
+| `search(query)` | 搜索公共频道 |
 | `create(name, description)` | 创建频道 |
-| `post(channelId, content)` | 发帖 |
+| `getDetail(channelId)` | 获取频道详情（包含 `forSale`、`salePrice`）|
+| `getPosts(channelId)` | 获取帖子列表 |
+| `post(channelId, content)` | 发帖（仅 Owner）|
 | `subscribe(channelId)` | 订阅 |
 | `unsubscribe(channelId)` | 取消订阅 |
+| `canPost(info)` | 本地判断：`info.role == "owner"` |
+| `listForSale(channelId, priceUsdt)` | Owner：挂牌出售频道 |
+| `buyChannel(channelId)` | 买家：创建购买订单 → `ChannelTradeOrder` |
 
 ### `client.vanity`（VanityManager）
 
 | 方法 | 说明 |
 |------|------|
-| `search(query)` | 搜索可用靓号 |
-| `purchase(aliasId)` | 购买靓号（返回支付链接）|
-| `bind(orderId)` | 绑定靓号（支付后调用）|
+| `search(query)` | 搜索可用靓号（规则引擎，无需 JWT）|
+| `reserve(aliasId)` | 注册前预留靓号 → `ReserveResult`（无需 JWT）|
+| `purchase(aliasId)` | 注册后购买 → `PurchaseResult`（需 JWT）|
+| `orderStatus(orderId)` | 轮询订单状态 → `"PENDING"` / `"confirmed"` / `"expired"` |
+| `bind(orderId)` | 支付确认后绑定靓号 |
 
 ### `client.push`（PushManager）
 
@@ -226,3 +233,59 @@ lifecycleScope.launch {
 - Bouncy Castle（Ed25519 / X25519 / AES-256-GCM / HKDF）
 - Retrofit2（REST API）
 - FCM（推送，对标 Web Push）
+
+## 🛡️ 安全与容错机制
+
+### 端到端加密体系
+
+| 层级 | 算法 | 用途 |
+|------|------|------|
+| 身份认证 | Ed25519 | Challenge-Response 登录认证、消息签名 |
+| 密钥交换 | X25519 ECDH | 按会话派生独立会话密钥 |
+| 消息加密 | AES-256-GCM | 所有消息载荷在客户端盲加密 |
+| 密钥派生 | HKDF-SHA256 | 从共享秘密 + 会话 ID 派生会话密钥 |
+| 媒体加密 | AES-256-GCM | 文件在本地加密后才上传 |
+
+### 反女巫攻击：工作量证明 (PoW)
+
+注册时需要解决 CPU 密集型 SHA-256 难题，现代设备通常需要 1-3 秒。
+
+### Challenge-Response 认证
+
+无密码。登录使用 Ed25519 数字签名：
+1. 客户端向服务器请求随机 challenge
+2. 客户端用 Ed25519 私钥签名 challenge
+3. 服务器验证签名并签发 JWT
+
+### WebSocket 容错机制
+
+| 机制 | 实现方式 |
+|------|---------|
+| **心跳保活** | 每 25 秒发送 `ping` 帧 |
+| **自动重连** | 指数退避：`min(1s × 2^n, 30s)` + 随机抖动 |
+| **GOAWAY 处理** | 新设备登录时服务端主动断连 |
+| **生命周期感知** | `ConnectivityManager` 网络恢复时自动重连 |
+
+### 服务端防护策略
+
+| 防护措施 | 详情 | SDK 影响 |
+|---------|------|---------|
+| **注册限速** | 每 IP 每小时最多 10 次 | `registerAccount()` 可能抛 429 |
+| **消息限速** | 每用户每分钟最多 120 条 | `sendMessage()` 可能抛 429 |
+| **消息去重** | `SETNX dedup:{msg_uuid}`（300s TTL）| 防止弱网重试产生重复消息 |
+| **JWT 吊销** | 新设备登录时写入 Redis 黑名单 | 过期令牌被 401 拒绝 |
+| **消息 TTL** | 24 小时后从中继服务器删除 | SDK 在 Room DB 中本地持久化 |
+| **媒体 TTL** | 24 小时后从 S3 删除 | 客户端负责备份 |
+
+### 密钥派生层级
+
+```
+BIP-39 助记词（12 个单词）
+  └─ SLIP-0010 硬化派生
+       ├─ m/44'/0'/0'/0/0 → Ed25519 签名密钥（身份标识）
+       └─ m/44'/1'/0'/0/0 → X25519 ECDH 密钥（加密用）
+                              └─ HKDF(shared_secret, conv_id)
+                                   └─ 按会话独立的 AES-256-GCM 会话密钥
+```
+
+用户只需备份 12 个助记词。所有密钥均可确定性重新派生。

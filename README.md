@@ -131,20 +131,27 @@ lifecycleScope.launch {
 
 | Function | Operation |
 |------|------|
-| `getMine()` | Fetch subscribed boards |
-| `search(query)` | Search directory |
-| `create(name, description)` | Init public channel identity signature |
-| `post(channelId, content)` | Publish payload |
-| `subscribe(channelId)` | Subscribe identity signature mechanism |
-| `unsubscribe(channelId)` | Revoke identity mapping bind |
+| `getMine()` | Fetch subscribed channels |
+| `search(query)` | Search public channels |
+| `create(name, description)` | Create a new public channel |
+| `getDetail(channelId)` | Get channel details (includes `forSale`, `salePrice`) |
+| `getPosts(channelId)` | Get channel post history |
+| `post(channelId, content)` | Publish content (owner only) |
+| `subscribe(channelId)` | Subscribe to channel |
+| `unsubscribe(channelId)` | Unsubscribe from channel |
+| `canPost(info)` | Local check: `info.role == "owner"` |
+| `listForSale(channelId, priceUsdt)` | Owner: list channel for sale at given USDT price |
+| `buyChannel(channelId)` | Buyer: create purchase order → `ChannelTradeOrder` |
 
 ### `client.vanity` (VanityManager)
 
 | Function | Operation |
 |------|------|
-| `search(query)` | Enumerate unassigned special alias blocks |
-| `purchase(aliasId)` | Allocate order node routing |
-| `bind(orderId)` | Assign successfully negotiated node block payload |
+| `search(query)` | Search available vanity IDs (rule engine, no JWT required) |
+| `reserve(aliasId)` | Pre-registration reserve → `ReserveResult` (no JWT) |
+| `purchase(aliasId)` | Post-registration purchase → `PurchaseResult` (JWT required) |
+| `orderStatus(orderId)` | Poll order status → `"PENDING"` / `"confirmed"` / `"expired"` |
+| `bind(orderId)` | Bind vanity ID to account after payment confirmed |
 
 ### `client.push` (PushManager)
 
@@ -226,3 +233,57 @@ To demonstrate the transparency of the zero-trust architecture, the following sp
 - Bouncy Castle API Core (Ed25519 / X25519 / AES-256-GCM / HKDF cryptographic dependencies)
 - Retrofit2 (REST API generation layer framework wrapper)
 - Google FCM (Server broadcast pushes equivalent to generic Web Push)
+
+## 🛡️ Security & Resilience
+
+### End-to-End Encryption
+
+| Layer | Algorithm | Purpose |
+|-------|-----------|---------|
+| Identity | Ed25519 | Challenge-Response authentication, message signing |
+| Key Exchange | X25519 ECDH | Per-conversation session key derivation |
+| Message Encryption | AES-256-GCM | All message payloads blind-encrypted client-side |
+| Key Derivation | HKDF-SHA256 | Session key from shared secret + conversation ID |
+| Media Encryption | AES-256-GCM | Files encrypted locally before upload to relay |
+
+### Anti-Sybil: Proof of Work (PoW)
+
+Registration requires solving a CPU-bound SHA-256 puzzle. Typically takes 1-3 seconds on modern devices.
+
+### Challenge-Response Authentication
+
+No passwords. Login uses Ed25519 digital signatures:
+1. Client requests random challenge from server
+2. Client signs challenge with Ed25519 private key
+3. Server verifies signature and issues JWT
+
+### WebSocket Resilience
+
+| Mechanism | Implementation |
+|-----------|---------------|
+| **Heartbeat** | `ping` frame every 25s |
+| **Auto-Reconnect** | Exponential backoff: `min(1s × 2^n, 30s)` with jitter |
+| **GOAWAY Handling** | Server-initiated disconnect on new device login |
+| **Lifecycle-Aware** | Auto-reconnects on `ConnectivityManager` network restore |
+
+### Server-Side Protections
+
+| Protection | Detail | SDK Impact |
+|------------|--------|------------|
+| **Registration Rate Limit** | 10/IP/hour | `registerAccount()` may throw 429 |
+| **Message Rate Limit** | 120/user/min | `sendMessage()` may throw 429 |
+| **Message Dedup** | `SETNX dedup:{msg_uuid}` (300s TTL) | Prevents duplicate messages |
+| **JWT Revocation** | Redis blacklist on new device login | Stale tokens rejected with 401 |
+| **Message TTL** | 24h relay purge | SDK persists locally in Room DB |
+| **Media TTL** | 24h S3 purge | Client-side backup responsibility |
+
+### Cryptographic Key Hierarchy
+
+```
+BIP-39 Mnemonic (12 words)
+  └─ SLIP-0010 Hardened Derivation
+       ├─ m/44'/0'/0'/0/0 → Ed25519 Signing Key (identity)
+       └─ m/44'/1'/0'/0/0 → X25519 ECDH Key (encryption)
+                              └─ HKDF(shared_secret, conv_id)
+                                   └─ Per-conversation AES-256-GCM session key
+```

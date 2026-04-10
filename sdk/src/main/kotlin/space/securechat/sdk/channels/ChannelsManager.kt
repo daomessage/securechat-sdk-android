@@ -37,17 +37,56 @@ class ChannelsManager(private val http: HttpClient) {
     /** 取消订阅 */
     suspend fun unsubscribe(channelId: String) = http.api.unsubscribeChannel(channelId)
 
+    /** 本地判断是否可发帖（仅 owner 可发） */
+    fun canPost(info: ChannelInfo?): Boolean = info?.role == "owner"
+
+    /** Owner 挂牌出售频道 */
+    suspend fun listForSale(channelId: String, priceUsdt: Int) {
+        http.api.listChannelForSale(ListChannelRequest(channelId, priceUsdt))
+    }
+
+    /** 买家购买频道（返回支付订单） */
+    suspend fun buyChannel(channelId: String): ChannelTradeOrder {
+        val r = http.api.buyChannel(channelId)
+        return ChannelTradeOrder(
+            orderId = r.order_id,
+            priceUsdt = r.price_usdt,
+            payTo = r.pay_to,
+            expiredAt = r.expired_at
+        )
+    }
+
+    /** 买家购买额外创建频道配额（返回支付订单） */
+    suspend fun buyQuota(): ChannelTradeOrder {
+        val r = http.api.buyQuota()
+        return ChannelTradeOrder(
+            orderId = r.order_id,
+            priceUsdt = r.price_usdt,
+            payTo = r.pay_to,
+            expiredAt = r.expired_at
+        )
+    }
+
     private fun space.securechat.sdk.http.ChannelInfo.toModel() = ChannelInfo(
-        id = id, aliasId = alias_id, name = name, description = description,
-        role = role, isSubscribed = is_subscribed
+        id = id, name = name, description = description,
+        role = role, isSubscribed = is_subscribed,
+        forSale = for_sale, salePrice = sale_price
     )
 }
 
 data class ChannelInfo(
     val id: String,
-    val aliasId: String?,
     val name: String,
     val description: String,
     val role: String?,
-    val isSubscribed: Boolean?
+    val isSubscribed: Boolean?,
+    val forSale: Boolean? = null,
+    val salePrice: Double? = null
+)
+
+data class ChannelTradeOrder(
+    val orderId: String,
+    val priceUsdt: Double,
+    val payTo: String,
+    val expiredAt: String
 )
