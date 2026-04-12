@@ -170,9 +170,10 @@ class SecureChatClient private constructor(private val context: Context) {
         messaging.onTyping = { alias, convId ->
             scope.launch(Dispatchers.Main) { typingListeners.forEach { it(alias, convId) } }
         }
-        // 信令帧分发到所有信令监听器
+        // 信令帧分发到所有信令监听器（先解密 payload 再分发）
         messaging.onSignal = { frame ->
-            scope.launch(Dispatchers.Main) { signalListeners.forEach { it(frame) } }
+            val decrypted = decryptSignalPayload(frame)
+            scope.launch(Dispatchers.Main) { signalListeners.forEach { it(decrypted) } }
         }
     }
 
@@ -196,16 +197,90 @@ class SecureChatClient private constructor(private val context: Context) {
     }
 
     /**
-     * 发送通话信令帧（CallManager 专用）
-     * 帧格式： Map<String, Any> 自动序列化为 JSON 后通过 WS 发出
+     * 发送通话信令帧（半加密：路由字段明文，SDP/Candidate 加密）
+     *
+     * 敏感字段（sdp, sdp_type, candidate）加密存入 payload，
+     * 路由字段（type, to, from, call_id, crypto_v）保持明文供服务端限流和转发。
+     *
      * @return true=已立即发出，false=已入队（重连后自动发送）
      */
     fun sendSignalFrame(frame: Map<String, Any?>): Boolean {
+        val type     = frame["type"]     as? String ?: ""
+        val to       = frame["to"]       as? String ?: ""
+        val from     = frame["from"]     as? String ?: ""
+        val callId   = frame["call_id"]  as? String ?: ""
+        val cryptoV  = frame["crypto_v"] ?: 1
+
+        // 路由字段（明文）
+        val routeFields = mutableMapOf<String, Any?>(
+            "type"     to type,
+            "to"       to to,
+            "from"     to from,
+            "call_id"  to callId,
+            "crypto_v" to cryptoV
+        )
+
+        // 敏感字段 = 全部字段 - 路由字段
+        val sensitiveKeys = frame.keys - setOf("type", "to", "from", "call_id", "crypto_v")
+        val sensitiveData = frame.filterKeys { it in sensitiveKeys }
+
+        // 尝试用会话密钥加密敏感字段
+        val sessionKey = getSessionKeyForAlias(to)
+        if (sessionKey != null && sensitiveData.isNotEmpty()) {
+            val moshi = com.squareup.moshi.Moshi.Builder()
+                .addLast(com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory())
+                .build()
+            val plaintext = moshi.adapter(Map::class.java).toJson(sensitiveData)
+            val encrypted = space.securechat.sdk.crypto.CryptoModule.encrypt(sessionKey, plaintext)
+            routeFields["payload"] = encrypted
+        } else {
+            // 无会话密钥：回退明文（兼容）
+            routeFields.putAll(sensitiveData)
+        }
+
         val moshi = com.squareup.moshi.Moshi.Builder()
             .addLast(com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory())
             .build()
-        val json = moshi.adapter(Map::class.java).toJson(frame)
+        val json = moshi.adapter(Map::class.java).toJson(routeFields)
         return transport.send(json)
+    }
+
+    /**
+     * 从本地数据库获取与指定 alias 的会话密钥
+     */
+    private fun getSessionKeyForAlias(aliasId: String): ByteArray? {
+        return try {
+            val session = kotlinx.coroutines.runBlocking {
+                db.sessionDao().getByAlias(aliasId)
+            } ?: return null
+            java.util.Base64.getDecoder().decode(session.sessionKeyBase64)
+        } catch (e: Exception) {
+            android.util.Log.w("SecureChatClient", "获取会话密钥失败: $aliasId", e)
+            null
+        }
+    }
+
+    /**
+     * 解密信令帧中的 payload 字段（在分发给 CallManager 前调用）
+     */
+    @Suppress("UNCHECKED_CAST")
+    internal fun decryptSignalPayload(frame: Map<String, Any?>): Map<String, Any?> {
+        val payload = frame["payload"] as? String ?: return frame
+        val from = frame["from"] as? String ?: return frame
+
+        val sessionKey = getSessionKeyForAlias(from) ?: return frame
+        return try {
+            val decrypted = space.securechat.sdk.crypto.CryptoModule.decrypt(sessionKey, payload)
+            val moshi = com.squareup.moshi.Moshi.Builder()
+                .addLast(com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory())
+                .build()
+            val decoded = moshi.adapter(Map::class.java).fromJson(decrypted) as? Map<String, Any?> ?: emptyMap()
+            // 合并：路由字段 + 解密后的敏感字段
+            frame + decoded
+        } catch (e: Exception) {
+            android.util.Log.e("SecureChatClient", "信令 payload 解密失败", e)
+            frame
+        }
     }
 
     /**

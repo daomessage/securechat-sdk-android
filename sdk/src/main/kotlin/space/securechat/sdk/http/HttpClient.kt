@@ -194,13 +194,15 @@ data class FriendProfile(
     val direction: String,      // sent | received
     val conversation_id: String? = null,
     val x25519_public_key: String = "",
+    val ed25519_public_key: String = "",
     val created_at: String? = null
 )
 
 data class LookupUserResponse(
     val alias_id: String,
     val nickname: String,
-    val x25519_public_key: String
+    val x25519_public_key: String,
+    val ed25519_public_key: String = ""
 )
 
 data class FriendRequestBody(val to_alias_id: String)

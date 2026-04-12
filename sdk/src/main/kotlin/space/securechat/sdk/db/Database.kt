@@ -90,6 +90,9 @@ interface SessionDao {
     @Query("SELECT * FROM sessions WHERE conversationId = :id LIMIT 1")
     suspend fun get(id: String): SessionEntity?
 
+    @Query("SELECT * FROM sessions WHERE theirAliasId = :aliasId LIMIT 1")
+    suspend fun getByAlias(aliasId: String): SessionEntity?
+
     @Query("SELECT * FROM sessions ORDER BY createdAt DESC")
     suspend fun getAll(): List<SessionEntity>
 
