@@ -47,6 +47,16 @@ class ContactsManager(
     }
 
     /**
+     * 拒绝好友申请
+     * 服务端将 friendship 状态置为 "rejected"；按产品设计 §11，不通知发起方。
+     * 对标 TS/iOS SDK: client.contacts.rejectFriendRequest(friendshipId)
+     */
+    suspend fun rejectFriendRequest(friendshipId: Long) {
+        http.api.rejectFriendRequest(friendshipId)
+        syncFriends()
+    }
+
+    /**
      * 同步全部好友列表并建立 ECDH 会话（App 启动时必须调用一次）
      * 🔒 SDK 自动：对每个已接受的好友计算 ECDH 会话密钥并写入 Room
      *
@@ -54,7 +64,8 @@ class ContactsManager(
      * 对标 TS SDK: client.contacts.syncFriends()
      */
     suspend fun syncFriends(): List<Friend> {
-        val myIdentity = db.identityDao().get()
+        // P1.9: 敏感字段由 Keystore 解密读取
+        val myIdentity = space.securechat.sdk.db.SecureIdentity.load(db)
             ?: error("No identity found. Call registerAccount() or restoreSession() first.")
         val myEcdhPrivKey = Base64.getDecoder().decode(myIdentity.ecdhPrivateKey)
 
@@ -78,7 +89,8 @@ class ContactsManager(
                             theirEcdhPublicKey = f.x25519_public_key,
                             sessionKeyBase64 = Base64.getEncoder().encodeToString(sessionKey),
                             trustState = "unverified",
-                            createdAt = System.currentTimeMillis()
+                            createdAt = System.currentTimeMillis(),
+                            theirEd25519PublicKey = f.ed25519_public_key.ifEmpty { null },
                         )
                     )
                 }

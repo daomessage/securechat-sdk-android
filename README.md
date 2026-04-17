@@ -125,6 +125,7 @@ lifecycleScope.launch {
 | `lookupUser(aliasId)` | Identity search mechanism |
 | `sendFriendRequest(aliasId)` | Initiate connection stream block |
 | `acceptFriendRequest(friendshipId)` | Fulfill connection stream block |
+| `rejectFriendRequest(friendshipId)` | Reject a pending inbound request (sender is not notified) |
 | `syncFriends()` | Polling fallback for fetching networks & constructing ECDH keys |
 
 ### `client.channels` (ChannelsManager)
@@ -159,6 +160,12 @@ lifecycleScope.launch {
 // Called dynamically inside FirebaseMessagingService.onNewToken() implementations
 lifecycleScope.launch {
     client.push.register(fcmToken)
+}
+
+// Disable push for this device session (e.g. user toggled off notifications
+// in Settings, or on logout). Safe to call multiple times.
+lifecycleScope.launch {
+    client.push.disable()
 }
 ```
 

@@ -22,4 +22,12 @@ class PushManager(private val http: HttpClient) {
     suspend fun register(fcmToken: String) {
         http.api.registerPush(PushRegisterRequest(token = fcmToken, platform = "android"))
     }
+
+    /**
+     * 注销当前设备的推送订阅（用户关闭通知 / 登出时调用）
+     * 对标 iOS/TS SDK: client.push.disablePush()
+     */
+    suspend fun disable() {
+        http.api.disablePush()
+    }
 }

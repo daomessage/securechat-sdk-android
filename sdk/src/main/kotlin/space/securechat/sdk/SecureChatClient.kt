@@ -197,50 +197,64 @@ class SecureChatClient private constructor(private val context: Context) {
     }
 
     /**
-     * 发送通话信令帧（半加密：路由字段明文，SDP/Candidate 加密）
+     * 发送通话信令帧（crypto_v=2：强制 Ed25519 签名 + AES-GCM 加密）
      *
-     * 敏感字段（sdp, sdp_type, candidate）加密存入 payload，
-     * 路由字段（type, to, from, call_id, crypto_v）保持明文供服务端限流和转发。
+     * 2026-04 安全加固：拒绝明文回退。若无会话密钥直接 throw。
+     * 签名覆盖 type / call_id / from / _ts / _nonce + 所有敏感字段。
      *
      * @return true=已立即发出，false=已入队（重连后自动发送）
      */
     fun sendSignalFrame(frame: Map<String, Any?>): Boolean {
-        val type     = frame["type"]     as? String ?: ""
-        val to       = frame["to"]       as? String ?: ""
-        val from     = frame["from"]     as? String ?: ""
-        val callId   = frame["call_id"]  as? String ?: ""
-        val cryptoV  = frame["crypto_v"] ?: 1
+        val type   = frame["type"]    as? String ?: ""
+        val to     = frame["to"]      as? String ?: ""
+        val from   = frame["from"]    as? String ?: ""
+        val callId = frame["call_id"] as? String ?: ""
 
-        // 路由字段（明文）
-        val routeFields = mutableMapOf<String, Any?>(
-            "type"     to type,
-            "to"       to to,
-            "from"     to from,
-            "call_id"  to callId,
-            "crypto_v" to cryptoV
+        val sensitiveKeys = frame.keys - setOf("type", "to", "from", "call_id", "crypto_v")
+        val sensitiveData = frame.filterKeys { it in sensitiveKeys }.toMutableMap()
+
+        val sessionKey = getSessionKeyForAlias(to)
+            ?: throw IllegalStateException("No session key for $to — cannot send signed signal")
+
+        // 1) 注入时间戳 + 随机 nonce 防重放
+        val nonceBytes = ByteArray(16).also { java.security.SecureRandom().nextBytes(it) }
+        val nonceHex = nonceBytes.joinToString("") { "%02x".format(it) }
+        val toSign = sensitiveData + mapOf(
+            "type"    to type,
+            "call_id" to callId,
+            "from"    to from,
+            "_ts"     to System.currentTimeMillis(),
+            "_nonce"  to nonceHex,
         )
 
-        // 敏感字段 = 全部字段 - 路由字段
-        val sensitiveKeys = frame.keys - setOf("type", "to", "from", "call_id", "crypto_v")
-        val sensitiveData = frame.filterKeys { it in sensitiveKeys }
-
-        // 尝试用会话密钥加密敏感字段
-        val sessionKey = getSessionKeyForAlias(to)
-        if (sessionKey != null && sensitiveData.isNotEmpty()) {
-            val moshi = com.squareup.moshi.Moshi.Builder()
-                .addLast(com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory())
-                .build()
-            val plaintext = moshi.adapter(Map::class.java).toJson(sensitiveData)
-            val encrypted = space.securechat.sdk.crypto.CryptoModule.encrypt(sessionKey, plaintext)
-            routeFields["payload"] = encrypted
-        } else {
-            // 无会话密钥：回退明文（兼容）
-            routeFields.putAll(sensitiveData)
-        }
+        // 2) Ed25519 签名（canonical: key 排序）
+        // Keystore 解密在 WebSocket 路径同步读取 — SecureIdentity.load 内部 suspend
+        val identity = runCatching {
+            kotlinx.coroutines.runBlocking { space.securechat.sdk.db.SecureIdentity.load(db) }
+        }.getOrNull() ?: throw IllegalStateException("No local identity for signing")
+        val signingPriv = java.util.Base64.getDecoder().decode(identity.signingPrivateKey)
 
         val moshi = com.squareup.moshi.Moshi.Builder()
             .addLast(com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory())
             .build()
+        val sortedSigned = toSign.toSortedMap()
+        val canonical = moshi.adapter(Map::class.java).toJson(sortedSigned)
+        val sig = space.securechat.sdk.keys.KeyDerivation.signChallenge(canonical.toByteArray(Charsets.UTF_8), signingPriv)
+        val signedInner = sortedSigned + mapOf("_sig" to sig.joinToString("") { "%02x".format(it) })
+
+        // 3) 加密 signedInner 作为 payload
+        val plaintext = moshi.adapter(Map::class.java).toJson(signedInner)
+        val encrypted = space.securechat.sdk.crypto.CryptoModule.encrypt(sessionKey, plaintext)
+
+        // 4) 外层信封（路由字段明文）
+        val routeFields = mapOf<String, Any?>(
+            "type"     to type,
+            "to"       to to,
+            "from"     to from,
+            "call_id"  to callId,
+            "crypto_v" to 2,
+            "payload"  to encrypted,
+        )
         val json = moshi.adapter(Map::class.java).toJson(routeFields)
         return transport.send(json)
     }
@@ -261,26 +275,84 @@ class SecureChatClient private constructor(private val context: Context) {
     }
 
     /**
-     * 解密信令帧中的 payload 字段（在分发给 CallManager 前调用）
+     * 解密 + 验签信令帧（crypto_v=2 强制）
+     * 校验失败直接返回空 map，让 CallManager 忽略该帧
      */
     @Suppress("UNCHECKED_CAST")
     internal fun decryptSignalPayload(frame: Map<String, Any?>): Map<String, Any?> {
-        val payload = frame["payload"] as? String ?: return frame
-        val from = frame["from"] as? String ?: return frame
+        val payload = frame["payload"] as? String ?: return emptyMap()
+        val from = frame["from"] as? String ?: return emptyMap()
+        val envelopeCallId = frame["call_id"] as? String ?: ""
 
-        val sessionKey = getSessionKeyForAlias(from) ?: return frame
+        val sessionKey = getSessionKeyForAlias(from) ?: return emptyMap()
+        val moshi = com.squareup.moshi.Moshi.Builder()
+            .addLast(com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory())
+            .build()
+
         return try {
             val decrypted = space.securechat.sdk.crypto.CryptoModule.decrypt(sessionKey, payload)
-            val moshi = com.squareup.moshi.Moshi.Builder()
-                .addLast(com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory())
-                .build()
-            val decoded = moshi.adapter(Map::class.java).fromJson(decrypted) as? Map<String, Any?> ?: emptyMap()
-            // 合并：路由字段 + 解密后的敏感字段
-            frame + decoded
+            val inner = moshi.adapter(Map::class.java).fromJson(decrypted) as? Map<String, Any?>
+                ?: return emptyMap()
+
+            // 1) 提取签名字段
+            val sigHex = inner["_sig"] as? String ?: return emptyMap()
+            val ts     = (inner["_ts"] as? Number)?.toLong() ?: return emptyMap()
+            val nonce  = inner["_nonce"] as? String ?: return emptyMap()
+
+            // 2) 时间窗 60s
+            if (Math.abs(System.currentTimeMillis() - ts) > 60_000) {
+                android.util.Log.w("SecureChatClient", "signal replay window exceeded")
+                return emptyMap()
+            }
+
+            // 3) nonce 去重
+            if (!checkAndRememberNonce(nonce)) {
+                android.util.Log.w("SecureChatClient", "signal nonce replay")
+                return emptyMap()
+            }
+
+            // 4) 内层 from / call_id 与外层一致
+            if (inner["from"] != from) return emptyMap()
+            if (envelopeCallId.isNotEmpty() && (inner["call_id"] as? String) != envelopeCallId) return emptyMap()
+
+            // 5) Ed25519 验签（对端公钥从 session 取）
+            val session = db.sessionDao().let {
+                runCatching { kotlinx.coroutines.runBlocking { it.getByAlias(from) } }.getOrNull()
+            } ?: return emptyMap()
+            val theirSigPub = java.util.Base64.getDecoder().decode(session.theirEd25519PublicKey ?: "")
+            val canonicalMap = (inner - "_sig").toSortedMap()
+            val canonical = moshi.adapter(Map::class.java).toJson(canonicalMap)
+            val sigBytes = ByteArray(sigHex.length / 2) {
+                java.lang.Integer.parseInt(sigHex.substring(it * 2, it * 2 + 2), 16).toByte()
+            }
+            val ok = space.securechat.sdk.keys.KeyDerivation.verifyChallenge(
+                canonical.toByteArray(Charsets.UTF_8), sigBytes, theirSigPub
+            )
+            if (!ok) {
+                android.util.Log.w("SecureChatClient", "signal signature INVALID from=$from")
+                return emptyMap()
+            }
+
+            // 校验通过：合并路由 + 内层（去掉签名元数据）
+            frame + inner.filterKeys { it != "_sig" && it != "_ts" && it != "_nonce" }
         } catch (e: Exception) {
-            android.util.Log.e("SecureChatClient", "信令 payload 解密失败", e)
-            frame
+            android.util.Log.e("SecureChatClient", "信令 verify/decrypt 失败", e)
+            emptyMap()
         }
+    }
+
+    // 最近 5 分钟 nonce 缓存（防重放）
+    private val seenNonces = java.util.concurrent.ConcurrentHashMap<String, Long>()
+    private fun checkAndRememberNonce(nonce: String): Boolean {
+        val now = System.currentTimeMillis()
+        val prev = seenNonces[nonce]
+        if (prev != null && prev > now) return false
+        seenNonces[nonce] = now + 5 * 60_000
+        // 清理过期
+        if (seenNonces.size > 2048) {
+            seenNonces.entries.removeAll { it.value < now }
+        }
+        return true
     }
 
     /**
@@ -450,6 +522,46 @@ class SecureChatClient private constructor(private val context: Context) {
         )
         db.messageDao().save(retracted.toEntity())
         scope.launch(Dispatchers.Main) { messageListeners.forEach { it(retracted) } }
+    }
+
+    /** 获取本地存储的助记词（Keystore 解密后返回；已注册账号才有）
+     *
+     * ⚠️ 敏感操作：仅用于"显示恢复短语"场景。App 展示后应立即丢弃 String 引用。
+     * 不应作为常规调用，也不要把返回值持久化到其它位置。
+     */
+    suspend fun getMnemonic(): String? {
+        android.util.Log.w("SecureChatClient", "getMnemonic() called — sensitive API, UI must set FLAG_SECURE")
+        return space.securechat.sdk.db.SecureIdentity.load(db)?.mnemonic
+    }
+
+    /** 查询服务端存储占用估算（字节） */
+    suspend fun getStorageEstimate(): space.securechat.sdk.http.StorageEstimate {
+        return http.api.getStorageEstimate()
+    }
+
+    /** 清除指定会话的本地消息历史 */
+    suspend fun clearHistory(conversationId: String) {
+        db.messageDao().deleteByConversation(conversationId)
+    }
+
+    /** 清除全部会话的本地消息历史 */
+    suspend fun clearAllHistory() {
+        messaging.clearAll()
+    }
+
+    /** 导出指定会话的 NDJSON */
+    suspend fun exportConversation(conversationId: String): String =
+        messaging.exportConversation(conversationId)
+
+    /** 导出全部会话的 NDJSON（按 sessionId 串接） */
+    suspend fun exportAllConversations(): String {
+        val sessions = db.sessionDao().getAll()
+        val sb = StringBuilder()
+        for (s in sessions) {
+            sb.append("# === ${s.conversationId} ===\n")
+            sb.append(messaging.exportConversation(s.conversationId))
+        }
+        return sb.toString()
     }
 
     /** 发送 typing 状态 */

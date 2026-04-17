@@ -71,18 +71,17 @@ class AuthManager(
         http.setToken(token)
         internalUUID = regResp.uuid
 
-        // 持久化
-        db.identityDao().save(
-            IdentityEntity(
-                uuid = regResp.uuid,
-                aliasId = regResp.alias_id,
-                nickname = nickname,
-                mnemonic = mnemonic,
-                signingPublicKey = sigPub,
-                ecdhPublicKey = ecdhPub,
-                signingPrivateKey = Base64.getEncoder().encodeToString(identity.signingKey.privateKey),
-                ecdhPrivateKey = Base64.getEncoder().encodeToString(identity.ecdhKey.privateKey)
-            )
+        // 持久化（敏感字段由 Keystore 加密，见 SecureIdentity）
+        space.securechat.sdk.db.SecureIdentity.save(
+            db = db,
+            uuid = regResp.uuid,
+            aliasId = regResp.alias_id,
+            nickname = nickname,
+            mnemonic = mnemonic,
+            signingPublicKey = sigPub,
+            ecdhPublicKey = ecdhPub,
+            signingPrivateKey = Base64.getEncoder().encodeToString(identity.signingKey.privateKey),
+            ecdhPrivateKey = Base64.getEncoder().encodeToString(identity.ecdhKey.privateKey),
         )
 
         return regResp.alias_id
@@ -96,7 +95,8 @@ class AuthManager(
      * 对标 TS SDK: client.restoreSession()
      */
     suspend fun restoreSession(): Pair<String, String>? {
-        val stored = db.identityDao().get() ?: return null
+        // 使用 SecureIdentity 读取并解密敏感字段（P1.9 加固）
+        val stored = space.securechat.sdk.db.SecureIdentity.load(db) ?: return null
 
         val privateKey = Base64.getDecoder().decode(stored.signingPrivateKey)
         val token = try {
@@ -111,10 +111,18 @@ class AuthManager(
     }
 
     /**
-     * 针对已有账号：利用旧助记词恢复（异地登录）
-     * 逻辑对标 TS SDK：注册时如果服务端返回 409 Conflict，则从 Error Body 中拆出 uuid 和 alias_id 并重新验证。
+     * 使用已有助记词登录（异地登录 / 换设备恢复）
+     *
+     * 对标 TS/iOS SDK: client.auth.loginWithMnemonic(mnemonic)
+     * 逻辑：注册时如果服务端返回 409 Conflict，则从 Error Body 中拆出 uuid 和 alias_id 并重新验证。
      */
-    suspend fun loginExt(mnemonic: String): String {
+    @Deprecated(
+        "Use loginWithMnemonic instead — unified naming across TS/Android/iOS SDKs.",
+        ReplaceWith("loginWithMnemonic(mnemonic)")
+    )
+    suspend fun loginExt(mnemonic: String): String = loginWithMnemonic(mnemonic)
+
+    suspend fun loginWithMnemonic(mnemonic: String): String {
         val identity = KeyDerivation.deriveIdentity(mnemonic)
         val sigPub = java.util.Base64.getEncoder().encodeToString(identity.signingKey.publicKey)
         val ecdhPub = java.util.Base64.getEncoder().encodeToString(identity.ecdhKey.publicKey)
@@ -157,18 +165,17 @@ class AuthManager(
         http.setToken(token)
         internalUUID = userUUID
 
-        // 持久化到 Room DB 成为本地默认身份
-        db.identityDao().save(
-            IdentityEntity(
-                uuid = userUUID,
-                aliasId = aliasId,
-                nickname = "Recovered User",
-                mnemonic = mnemonic,
-                signingPublicKey = sigPub,
-                ecdhPublicKey = ecdhPub,
-                signingPrivateKey = java.util.Base64.getEncoder().encodeToString(identity.signingKey.privateKey),
-                ecdhPrivateKey = java.util.Base64.getEncoder().encodeToString(identity.ecdhKey.privateKey)
-            )
+        // 持久化到 Room DB 成为本地默认身份（Keystore 加密）
+        space.securechat.sdk.db.SecureIdentity.save(
+            db = db,
+            uuid = userUUID,
+            aliasId = aliasId,
+            nickname = "Recovered User",
+            mnemonic = mnemonic,
+            signingPublicKey = sigPub,
+            ecdhPublicKey = ecdhPub,
+            signingPrivateKey = java.util.Base64.getEncoder().encodeToString(identity.signingKey.privateKey),
+            ecdhPrivateKey = java.util.Base64.getEncoder().encodeToString(identity.ecdhKey.privateKey),
         )
 
         return aliasId

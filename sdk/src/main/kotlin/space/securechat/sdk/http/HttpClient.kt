@@ -92,9 +92,16 @@ interface ApiService {
     @PUT("api/v1/friends/{id}/accept")
     suspend fun acceptFriendRequest(@Path("id") friendshipId: Long): AcceptFriendResponse
 
+    @POST("api/v1/friends/{id}/reject")
+    suspend fun rejectFriendRequest(@Path("id") friendshipId: Long): Unit
+
     // ── 会话 ────────────────────────────────────────────────────────
     @GET("api/v1/conversations/active")
     suspend fun getActiveConversations(): ActiveConversationsResponse
+
+    // ── 存储估算 ───────────────────────────────────────────────────
+    @GET("api/v1/storage/estimate")
+    suspend fun getStorageEstimate(): StorageEstimate
 
     // ── 媒体上传 ────────────────────────────────────────────────────
     @POST("api/v1/media/upload-url")
@@ -157,6 +164,9 @@ interface ApiService {
     // ── Push ─────────────────────────────────────────────────────────
     @POST("api/v1/push/register")
     suspend fun registerPush(@Body body: PushRegisterRequest): Unit
+
+    @POST("api/v1/push/disable")
+    suspend fun disablePush(): Unit
 }
 
 // ─── 请求/响应数据类（snake_case，与服务端 JSON 一致）───────────────────
@@ -279,3 +289,10 @@ data class VanityReserveResponse(
     val expired_at: String
 )
 data class OrderStatusResponse(val status: String)  // PENDING | confirmed | expired
+
+// ── 存储估算 ─────────────────────────────────────────────────────────
+data class StorageEstimate(
+    val used_bytes: Long = 0,
+    val quota_bytes: Long = 0,
+    val message_count: Int = 0
+)

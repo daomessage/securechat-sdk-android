@@ -125,6 +125,21 @@ object KeyDerivation {
         return signer.generateSignature()
     }
 
+    /**
+     * Ed25519 验签（对标 TS SDK: verifySignal 内部）
+     * @return true 验证通过；false 签名无效或格式错误
+     */
+    fun verifyChallenge(message: ByteArray, signature: ByteArray, publicKey: ByteArray): Boolean {
+        return try {
+            val verifier = Ed25519Signer()
+            verifier.init(false, Ed25519PublicKeyParameters(publicKey, 0))
+            verifier.update(message, 0, message.size)
+            verifier.verifySignature(signature)
+        } catch (_: Exception) {
+            false
+        }
+    }
+
     // ── X25519 ECDH ───────────────────────────────────────────────────
 
     /**

@@ -125,6 +125,7 @@ lifecycleScope.launch {
 | `lookupUser(aliasId)` | 搜索用户（添加好友前的查询）|
 | `sendFriendRequest(aliasId)` | 发送好友申请 |
 | `acceptFriendRequest(friendshipId)` | 接受好友申请 |
+| `rejectFriendRequest(friendshipId)` | 拒绝好友申请（不通知发起方）|
 | `syncFriends()` | 同步全部好友 + 自动建立 ECDH 会话 |
 
 ### `client.channels`（ChannelsManager）
@@ -159,6 +160,11 @@ lifecycleScope.launch {
 // 在 FirebaseMessagingService.onNewToken() 中调用
 lifecycleScope.launch {
     client.push.register(fcmToken)
+}
+
+// 注销本设备推送（用户在设置关闭通知 / 登出前调用）
+lifecycleScope.launch {
+    client.push.disable()
 }
 ```
 

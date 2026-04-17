@@ -30,10 +30,11 @@ data class IdentityEntity(
 data class SessionEntity(
     @PrimaryKey val conversationId: String,
     val theirAliasId: String,
-    val theirEcdhPublicKey: String, // Base64
+    val theirEcdhPublicKey: String, // Base64 X25519
     val sessionKeyBase64: String,
-    val trustState: String,         // "unverified" | "verified"
-    val createdAt: Long
+    val trustState: String,                             // "unverified" | "verified"
+    val createdAt: Long,
+    val theirEd25519PublicKey: String? = null,          // 新增：对端 Ed25519 签名公钥（P0.4 加固）
 )
 
 /**
@@ -154,7 +155,7 @@ interface TrustDao {
 
 @Database(
     entities = [IdentityEntity::class, SessionEntity::class, MessageEntity::class, TrustEntity::class],
-    version = 2,
+    version = 3,
     exportSchema = false
 )
 abstract class SecureChatDatabase : RoomDatabase() {
