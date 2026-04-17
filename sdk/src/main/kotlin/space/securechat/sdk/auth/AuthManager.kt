@@ -127,6 +127,15 @@ class AuthManager(
         val sigPub = java.util.Base64.getEncoder().encodeToString(identity.signingKey.publicKey)
         val ecdhPub = java.util.Base64.getEncoder().encodeToString(identity.ecdhKey.publicKey)
 
+        // PoW 防刷(P3 加固后服务端强制要求)
+        var powNonce = ""
+        try {
+            val pow = http.api.getPowChallenge()
+            powNonce = CryptoModule.computePow(pow.challenge_string, pow.difficulty)
+        } catch (_: Exception) {
+            // PoW 失败不阻塞;服务端会返回 400 让用户重试
+        }
+
         var userUUID = ""
         var aliasId = ""
 
@@ -135,7 +144,8 @@ class AuthManager(
                 RegisterRequest(
                     ed25519_public_key = sigPub,
                     x25519_public_key = ecdhPub,
-                    nickname = "Recovered User"
+                    nickname = "Recovered User",
+                    pow_nonce = powNonce
                 )
             )
             userUUID = regResp.uuid
