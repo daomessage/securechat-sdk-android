@@ -13,6 +13,11 @@ import space.securechat.sdk.db.SecureChatDatabase
 import space.securechat.sdk.http.HttpClient
 import space.securechat.sdk.keys.KeyDerivation
 import space.securechat.sdk.messaging.MessageManager
+import space.securechat.sdk.messaging.MessagesModule
+import space.securechat.sdk.media.MediaModule
+import space.securechat.sdk.security.SecurityService
+import space.securechat.sdk.events.EventBus
+import space.securechat.sdk.events.PublicEventBus
 import space.securechat.sdk.messaging.StoredMessage
 import space.securechat.sdk.messaging.WSTransport
 import space.securechat.sdk.messaging.toEntity
@@ -151,6 +156,23 @@ class SecureChatClient private constructor(private val context: Context) {
 
     /** 多媒体：加密上传/下载 (对接 S3/R2) */
     val media = space.securechat.sdk.media.MediaManager(http, http.okhttpClient)
+
+    // ── 0.3.0 响应式层 ─────────────────────────────────────────────────────
+
+    /** 全局事件总线(内部) */
+    internal val _eventBus = EventBus()
+
+    /** 对外事件总线: client.events.network.collect { ... } */
+    val events: PublicEventBus = _eventBus.toPublic()
+
+    /** 0.3.0 响应式 消息模块 (包装老 messaging) */
+    val messages: MessagesModule by lazy { MessagesModule(messaging, db, _eventBus, scope) }
+
+    /** 0.3.0 响应式 媒介模块 */
+    val mediaReactive: MediaModule by lazy { MediaModule(media, _eventBus, scope) }
+
+    /** 0.3.0 响应式 信任模块 */
+    val trust: SecurityService by lazy { SecurityService(security, scope) }
 
     // ── 事件监听 ──────────────────────────────────────────────────────────
 
