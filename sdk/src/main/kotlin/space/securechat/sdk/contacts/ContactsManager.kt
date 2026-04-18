@@ -15,6 +15,20 @@ class ContactsManager(
     private val http: HttpClient,
     private val db: SecureChatDatabase
 ) {
+    // ── 好友列表去重缓存(1 秒窗口) ────────────────────────
+    // 原因:UI 多处(ContactsTab / MessagesTab / ChatScreen / MainScreen)都会
+    //      在 LaunchedEffect 里调 syncFriends(),用户切 Tab 时连续产生 4-5 次
+    //      同一 API 请求,给用户"卡住不反应"的错觉。1 秒内重复调用返回上次结果。
+    //      用户主动操作(accept/send)结束后 reload 时,显式 invalidate 会刷新。
+    @Volatile private var friendsCache: List<Friend>? = null
+    @Volatile private var friendsCacheAt: Long = 0L
+    private val friendsCacheTtlMs: Long = 1_000L
+
+    /** 强制下次 syncFriends 走网络(accept/send 等写操作后调用) */
+    fun invalidateFriendsCache() {
+        friendsCache = null
+        friendsCacheAt = 0L
+    }
 
     /**
      * 搜索用户（用于添加好友前的查询页）
@@ -41,7 +55,8 @@ class ContactsManager(
      */
     suspend fun acceptFriendRequest(friendshipId: Long): String {
         val resp = http.api.acceptFriendRequest(friendshipId)
-        // 对标 TS SDK：接受后自动 syncFriends 触发 ECDH 会话建立
+        // 接受后需要立即拿到 conv_id 建立 ECDH → 必须绕过缓存
+        invalidateFriendsCache()
         syncFriends()
         return resp.conversation_id
     }
@@ -53,6 +68,7 @@ class ContactsManager(
      */
     suspend fun rejectFriendRequest(friendshipId: Long) {
         http.api.rejectFriendRequest(friendshipId)
+        invalidateFriendsCache()
         syncFriends()
     }
 
@@ -64,6 +80,12 @@ class ContactsManager(
      * 对标 TS SDK: client.contacts.syncFriends()
      */
     suspend fun syncFriends(): List<Friend> {
+        // 1 秒内重复调用直接返回缓存(避免 UI 多处 LaunchedEffect 雪崩拉 API)
+        val cached = friendsCache
+        if (cached != null && System.currentTimeMillis() - friendsCacheAt < friendsCacheTtlMs) {
+            return cached
+        }
+
         // P1.9: 敏感字段由 Keystore 解密读取
         val myIdentity = space.securechat.sdk.db.SecureIdentity.load(db)
             ?: error("No identity found. Call registerAccount() or restoreSession() first.")
@@ -108,6 +130,9 @@ class ContactsManager(
                 )
             )
         }
+        // 写入去重缓存
+        friendsCache = result
+        friendsCacheAt = System.currentTimeMillis()
         return result
     }
 }
