@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "976525939922",
+    "project_id": "chat-db264",
+    "storage_bucket": "chat-db264.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:976525939922:android:166667f9da2ba61e72490b",
+        "android_client_info": {
+          "package_name": "space.securechat.sample"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBEgHIHKjvl0cc0uC97fIWFkx2r7Hsd7HI"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
