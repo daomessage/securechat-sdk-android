@@ -1,6 +1,6 @@
 // sdk/build.gradle.kts
 group = "space.securechat"
-version = "1.0.4"
+version = "1.0.5"
 
 plugins {
     alias(libs.plugins.android.library)
