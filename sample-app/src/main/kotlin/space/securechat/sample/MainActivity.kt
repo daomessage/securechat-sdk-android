@@ -135,7 +135,9 @@ fun SampleAppRoot(
                         screen = AppScreen.CHAT
                     }
                 }
-                mgr.onIncomingCall = { fromAlias ->
+                mgr.onIncomingCall = { fromAlias, _isVideo ->
+                    // 1.0.12+ _isVideo 由 offer SDP m=video 判断, UI 可据此选响铃界面
+                    // 当前 CallScreen 统一处理音/视频, 先忽略此参数
                     callRemoteAlias = fromAlias
                     screen = AppScreen.CALL
                 }

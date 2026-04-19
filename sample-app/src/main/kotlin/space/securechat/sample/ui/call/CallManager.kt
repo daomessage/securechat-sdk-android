@@ -44,7 +44,8 @@ class CallManager(
     var onStateChange:  ((State) -> Unit)? = null
     var onLocalStream:  ((VideoTrack, AudioTrack?) -> Unit)? = null
     var onRemoteStream: ((VideoTrack?, AudioTrack?) -> Unit)? = null
-    var onIncomingCall: ((fromAlias: String) -> Unit)? = null
+    // 1.0.12+ 携带 isVideo: 由 offer SDP 的 m=video 行自动判断, 不依赖发起方显式声明
+    var onIncomingCall: ((fromAlias: String, isVideo: Boolean) -> Unit)? = null
     var onError:        ((Throwable) -> Unit)? = null
 
     // ── WebRTC 核心对象 ───────────────────────────────────────────
@@ -232,9 +233,11 @@ class CallManager(
                     SessionDescription(SessionDescription.Type.OFFER, sdp)
                 )
                 // 等待底层设置完成后再刷入
-                scope.launch(Dispatchers.Main) { 
+                // 1.0.12+ 从 offer SDP 解析 m=video 行, 决定是视频还是音频来电
+                val isVideo = sdp.lineSequence().any { it.startsWith("m=video ") }
+                scope.launch(Dispatchers.Main) {
                     flushIceCandidates()
-                    onIncomingCall?.invoke(from)
+                    onIncomingCall?.invoke(from, isVideo)
                     setState(State.RINGING)
                 }
             } catch (e: Exception) {
