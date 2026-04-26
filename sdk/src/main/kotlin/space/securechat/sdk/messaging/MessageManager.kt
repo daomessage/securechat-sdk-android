@@ -34,6 +34,10 @@ class MessageManager(
     var onTyping: ((String, String) -> Unit)? = null       // (fromAlias, convId)
     /** 信令帧回调（通话/Call 模块使用），注入后接收所有 call_* 类型帧 */
     var onSignal: ((Map<String, Any?>) -> Unit)? = null
+    /** P0-C(2026-04-26): 好友通讯录变更回调 (type, frame)。
+     *  type ∈ {"friend_request", "friend_accepted"}。
+     *  SecureChatClient 桥接到 contactsChange Flow,UI 订阅后立刻刷新好友列表。 */
+    var onContactsChange: ((String, Map<String, Any?>) -> Unit)? = null
 
     init {
         // 注册帧处理器
@@ -232,7 +236,23 @@ class MessageManager(
             "status_change"-> handleStatusChange(frame)
             "typing"       -> handleTypingFrame(frame)
             "retract"      -> handleRetract(frame)
-            "goaway"       -> transport.forceDisconnectGoaway(frame["reason"] as? String ?: "kicked_by_server")
+            "goaway"       -> {
+                // 防御式读取:对齐 TS SDK transport.ts 行为
+                // 服务端历史上把 new_device_login 的 reason 嵌套在 payload 内,
+                // 而 server_shutdown / jwt_revoked 是顶层。两层都要兼容。
+                val payload = frame["payload"] as? Map<*, *>
+                val reason = (payload?.get("reason") as? String)
+                    ?: (frame["reason"] as? String)
+                    ?: "kicked_by_server"
+                transport.forceDisconnectGoaway(reason)
+            }
+            // P0-C(2026-04-26): 好友通讯录变更通知。服务端在 friends/handler.go
+            // PublishCore("msg.notify.{uuid}", ...),gateway 转成 WS 帧推过来。
+            // 之前 SDK 没分发,UI 只能 10s 轮询;现在零延迟刷新。
+            "friend_request",
+            "friend_accepted" -> {
+                onContactsChange?.invoke(type, frame)
+            }
             // ── 通话信令帧：透传给 CallManager 处理（不解密，直接路由）──
             else           -> if (type.startsWith("call_")) onSignal?.invoke(frame)
         }

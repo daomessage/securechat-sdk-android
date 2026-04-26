@@ -1,6 +1,8 @@
 package space.securechat.sdk.auth
 
 import android.content.Context
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import space.securechat.sdk.crypto.CryptoModule
 import space.securechat.sdk.db.*
 import space.securechat.sdk.http.*
@@ -23,6 +25,14 @@ class AuthManager(
     /** 当前登录账号的 UUID（WebSocket 连接需要）*/
     var internalUUID: String? = null
         private set
+
+    /**
+     * 串行化 restoreSession / reauthenticate / authenticate,防止并发自踢:
+     * Service.ensureConnected 和 AppNavigation.LaunchedEffect 在同一进程几乎同时启动时,
+     * 两个协程同时读到 http.getToken() == null,各跑一次 authenticate,
+     * 服务端 revokeOldSessions 把先到的 JTI 撤销,30s 后 revalidateLoop 推 GOAWAY → 误踢。
+     */
+    private val authMutex = Mutex()
 
     /** 获取本地存储的 AliasID，不发起网络请求 */
     suspend fun getLocalAliasId(): String? {
@@ -93,21 +103,50 @@ class AuthManager(
      * 🔒 SDK 自动完成：读 Room DB → Ed25519 签名挑战 → 获取 JWT
      * @return (aliasId, nickname) 或 null（无本地身份）
      * 对标 TS SDK: client.restoreSession()
+     *
+     * 🔁 幂等保证(关键!):
+     * 服务端 revokeOldSessions 每次新认证都会撤销旧 JTI,
+     * 如果短时间内多处调用 restoreSession(Activity / FcmService / MessagingForegroundService),
+     * 第一个 JTI 会被第二个撤销,30 秒后 revalidateLoop 命中导致 jwt_revoked GOAWAY。
+     * 因此:已经有 token 时直接复用,只在第一次或主动 logout 后才重新认证。
      */
-    suspend fun restoreSession(): Pair<String, String>? {
-        // 使用 SecureIdentity 读取并解密敏感字段（P1.9 加固）
-        val stored = space.securechat.sdk.db.SecureIdentity.load(db) ?: return null
+    suspend fun restoreSession(): Pair<String, String>? = authMutex.withLock {
+        val stored = space.securechat.sdk.db.SecureIdentity.load(db) ?: return@withLock null
+
+        // 已有有效 token → 复用,不重新 authenticate(避免撤销自己)
+        // 在 mutex 内重新检查,防止两个协程都先读到 null 然后都进 authenticate 的并发条件。
+        if (http.getToken() != null) {
+            internalUUID = stored.uuid
+            return@withLock stored.aliasId to stored.nickname
+        }
 
         val privateKey = Base64.getDecoder().decode(stored.signingPrivateKey)
         val token = try {
             authenticate(stored.uuid, privateKey)
         } catch (e: Exception) {
-            return null  // 认证失败（助记词彻底失效等），回 welcome 页
+            return@withLock null  // 认证失败（助记词彻底失效等），回 welcome 页
         }
 
         http.setToken(token)
         internalUUID = stored.uuid
-        return stored.aliasId to stored.nickname
+        stored.aliasId to stored.nickname
+    }
+
+    /**
+     * 强制重新认证(用于 jwt_revoked 自愈场景)
+     * 不复用现有 token,始终走完整 authenticate 流程拿新 JTI。
+     */
+    suspend fun reauthenticate(): Pair<String, String>? = authMutex.withLock {
+        val stored = space.securechat.sdk.db.SecureIdentity.load(db) ?: return@withLock null
+        val privateKey = Base64.getDecoder().decode(stored.signingPrivateKey)
+        val token = try {
+            authenticate(stored.uuid, privateKey)
+        } catch (e: Exception) {
+            return@withLock null
+        }
+        http.setToken(token)
+        internalUUID = stored.uuid
+        stored.aliasId to stored.nickname
     }
 
     /**

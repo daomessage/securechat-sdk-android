@@ -83,6 +83,11 @@ class SecureChatClient private constructor(private val context: Context) {
         const val EVENT_NETWORK_STATE = "network_state"
         /** 通话信令帧事件（除 EVENT_MESSAGE/TYPING 以外的所有 call_* 帧） */
         const val EVENT_SIGNAL       = "call_signal"
+        /** P0-C(2026-04-26): 好友通讯录变更(收到好友请求 / 对方同意请求)。
+         *  listener 签名 (eventType: String, frame: Map) → Unit,
+         *  eventType ∈ {"friend_request", "friend_accepted"}。
+         *  UI 收到此事件应重新拉取好友列表,无需轮询。 */
+        const val EVENT_CONTACTS_CHANGE = "contacts_change"
 
         @Volatile private var instance: SecureChatClient? = null
 
@@ -181,6 +186,8 @@ class SecureChatClient private constructor(private val context: Context) {
     private val typingListeners  = mutableSetOf<(String, String) -> Unit>()
     /** 通话信令监听器（CallManager 注入） */
     private val signalListeners  = mutableSetOf<(Map<String, Any?>) -> Unit>()
+    /** P0-C: 好友通讯录变更监听器 */
+    private val contactsChangeListeners = mutableSetOf<(String, Map<String, Any?>) -> Unit>()
 
     init {
         messaging.onMessage = { msg ->
@@ -196,6 +203,12 @@ class SecureChatClient private constructor(private val context: Context) {
         messaging.onSignal = { frame ->
             val decrypted = decryptSignalPayload(frame)
             scope.launch(Dispatchers.Main) { signalListeners.forEach { it(decrypted) } }
+        }
+        // P0-C(2026-04-26): 好友通讯录事件分发
+        messaging.onContactsChange = { type, frame ->
+            scope.launch(Dispatchers.Main) {
+                contactsChangeListeners.forEach { it(type, frame) }
+            }
         }
     }
 
@@ -214,6 +227,10 @@ class SecureChatClient private constructor(private val context: Context) {
             EVENT_STATUS_CHANGE-> { statusListeners.add(listener as (String, String) -> Unit);        return { statusListeners.remove(listener) } }
             EVENT_TYPING       -> { typingListeners.add(listener as (String, String) -> Unit);        return { typingListeners.remove(listener) } }
             EVENT_SIGNAL       -> { signalListeners.add(listener as (Map<String, Any?>) -> Unit);     return { signalListeners.remove(listener) } }
+            EVENT_CONTACTS_CHANGE -> {
+                contactsChangeListeners.add(listener as (String, Map<String, Any?>) -> Unit)
+                return { contactsChangeListeners.remove(listener) }
+            }
             else               -> return {}
         }
     }
@@ -525,6 +542,12 @@ class SecureChatClient private constructor(private val context: Context) {
      * 对标 TS SDK: client.restoreSession()
      */
     suspend fun restoreSession(): Pair<String, String>? = auth.restoreSession()
+
+    /**
+     * 强制重新认证(用于 jwt_revoked 自愈)
+     * 与 restoreSession 不同,这里始终走完整 authenticate 流程,获取新 JTI。
+     */
+    suspend fun reauthenticate(): Pair<String, String>? = auth.reauthenticate()
 
     /**
      * 获取会话信息（含 sessionKey），供媒体下载解密使用

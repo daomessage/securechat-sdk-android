@@ -84,11 +84,27 @@ class WSTransport(
         shouldReconnect = true
         isKicked = false
         retryCount = 0
-        doConnect(uuid, token)
+        // P2-G: 幂等保护必须用 CAS,否则两个并发 connect() 都看到 Closed/Disconnected
+        // 都通过 guard,都进 doConnect() 开第二条 WS,触发服务端 Manager.Register
+        // 把第一条踢掉,误报 new_device_login。
+        // 调用点示例:AppNavigation.LaunchedEffect(MAIN) 和
+        // MessagingForegroundService.ensureConnected() 几乎同时跑。
+        // 已 Connected / Connecting 直接复用,不重连。
+        val cur = _networkState.value
+        if (cur is NetworkState.Connected || cur is NetworkState.Connecting) {
+            return
+        }
+        // 原子地把状态从当前值切到 Connecting,只有抢到的那一方才真正发起 WS。
+        if (!_networkState.compareAndSet(cur, NetworkState.Connecting)) {
+            return
+        }
+        doConnect(uuid, token, alreadyConnecting = true)
     }
 
-    private fun doConnect(uuid: String, token: String) {
-        _networkState.value = NetworkState.Connecting
+    private fun doConnect(uuid: String, token: String, alreadyConnecting: Boolean = false) {
+        if (!alreadyConnecting) {
+            _networkState.value = NetworkState.Connecting
+        }
 
         val wsUrl = HttpClient.CORE_API_BASE.replace("^http".toRegex(), "ws") + "/ws"
         val request = Request.Builder()
