@@ -136,6 +136,9 @@ class ContactsManager(
                                 theirEd25519PublicKey = f.ed25519_public_key.ifEmpty { null },
                             )
                         )
+                    } else if (existing.theirEd25519PublicKey == null && f.ed25519_public_key.isNotEmpty()) {
+                        // 补填之前未存入的 Ed25519 公钥（老会话迁移）
+                        db.sessionDao().save(existing.copy(theirEd25519PublicKey = f.ed25519_public_key))
                     }
                 }
 

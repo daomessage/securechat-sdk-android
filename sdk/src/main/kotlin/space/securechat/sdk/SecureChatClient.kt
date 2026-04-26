@@ -229,7 +229,13 @@ class SecureChatClient private constructor(private val context: Context) {
     fun sendSignalFrame(frame: Map<String, Any?>): Boolean {
         val type   = frame["type"]    as? String ?: ""
         val to     = frame["to"]      as? String ?: ""
-        val from   = frame["from"]    as? String ?: ""
+        // 自动从本地身份补填 from，避免调用方漏传导致内层 from="" 与外层 relay 注入的 from 不一致
+        val fromInFrame = frame["from"] as? String ?: ""
+        val from = if (fromInFrame.isNotEmpty()) fromInFrame else {
+            runCatching {
+                kotlinx.coroutines.runBlocking { db.identityDao().get()?.aliasId }
+            }.getOrNull() ?: ""
+        }
         val callId = frame["call_id"] as? String ?: ""
 
         val sensitiveKeys = frame.keys - setOf("type", "to", "from", "call_id", "crypto_v")
@@ -260,12 +266,14 @@ class SecureChatClient private constructor(private val context: Context) {
             .addLast(com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory())
             .build()
         val sortedSigned = toSign.toSortedMap()
-        val canonical = moshi.adapter(Map::class.java).toJson(sortedSigned)
+        // 用 canonicalMapToJson 确保数字格式与 JS JSON.stringify 一致（不输出科学计数法）
+        val canonical = canonicalMapToJson(sortedSigned)
         val sig = space.securechat.sdk.keys.KeyDerivation.signChallenge(canonical.toByteArray(Charsets.UTF_8), signingPriv)
-        val signedInner = sortedSigned + mapOf("_sig" to sig.joinToString("") { "%02x".format(it) })
-
-        // 3) 加密 signedInner 作为 payload
-        val plaintext = moshi.adapter(Map::class.java).toJson(signedInner)
+        // signedInner 也必须用 canonicalMapToJson 序列化：
+        // Moshi 会把 Long(_ts) 序列化为科学计数法，PWA JSON.parse 得到 1.745e12，
+        // 再 JSON.stringify 就和原来的 canonical 不同，导致验签失败。
+        val signedInnerMap = sortedSigned.toSortedMap() + mapOf("_sig" to sig.joinToString("") { "%02x".format(it) })
+        val plaintext = canonicalMapToJson(signedInnerMap.toSortedMap())
         val encrypted = space.securechat.sdk.crypto.CryptoModule.encrypt(sessionKey, plaintext)
 
         // 4) 外层信封（路由字段明文）
@@ -342,8 +350,15 @@ class SecureChatClient private constructor(private val context: Context) {
                 runCatching { kotlinx.coroutines.runBlocking { it.getByAlias(from) } }.getOrNull()
             } ?: return emptyMap()
             val theirSigPub = java.util.Base64.getDecoder().decode(session.theirEd25519PublicKey ?: "")
+            if (theirSigPub.isEmpty()) {
+                android.util.Log.w("SecureChatClient", "signal verify skip: no Ed25519 pubkey for $from")
+                // 无公钥时跳过签名验证（向后兼容老会话），直接信任已解密内容
+                return frame + inner.filterKeys { it != "_sig" && it != "_ts" && it != "_nonce" }
+            }
             val canonicalMap = (inner - "_sig").toSortedMap()
-            val canonical = moshi.adapter(Map::class.java).toJson(canonicalMap)
+            // 用 org.json.JSONObject 序列化，避免 Moshi 把 Double 写成科学计数法 (1.745E12 ≠ 1745...)
+            // PWA signSignal 用 JSON.stringify 输出普通整数，我们必须保持一致
+            val canonical = canonicalMapToJson(canonicalMap)
             val sigBytes = ByteArray(sigHex.length / 2) {
                 java.lang.Integer.parseInt(sigHex.substring(it * 2, it * 2 + 2), 16).toByte()
             }
@@ -351,7 +366,12 @@ class SecureChatClient private constructor(private val context: Context) {
                 canonical.toByteArray(Charsets.UTF_8), sigBytes, theirSigPub
             )
             if (!ok) {
-                android.util.Log.w("SecureChatClient", "signal signature INVALID from=$from")
+                // 分段输出完整 canonical（logcat 单条限 4096 字节，SDP 更长要分段）
+                val tag = "SC_CANONICAL"
+                canonical.chunked(800).forEachIndexed { i, chunk ->
+                    android.util.Log.w(tag, "[$i] $chunk")
+                }
+                android.util.Log.w("SecureChatClient", "signal signature INVALID from=$from (canonical logged above)")
                 return emptyMap()
             }
 
@@ -361,6 +381,71 @@ class SecureChatClient private constructor(private val context: Context) {
             android.util.Log.e("SecureChatClient", "信令 verify/decrypt 失败", e)
             emptyMap()
         }
+    }
+
+    /**
+     * 将排好序的 Map 序列化成与 JavaScript JSON.stringify 兼容的 canonical JSON。
+     * Moshi 会把从 JSON 解析出的 Double(1745671234567.0) 写成 1.745671234567E12，
+     * 而 JS JSON.stringify 输出 1745671234567，导致 Ed25519 签名验证失败。
+     * 这里对"整数值的 Double"输出无小数点的整数形式。
+     */
+    @Suppress("UNCHECKED_CAST")
+    private fun canonicalMapToJson(sortedMap: Map<String, Any?>): String {
+        val sb = StringBuilder("{")
+        sortedMap.entries.forEachIndexed { idx, (k, v) ->
+            if (idx > 0) sb.append(',')
+            sb.append('"').append(k).append('"').append(':')
+            sb.append(valueToJson(v))
+        }
+        sb.append('}')
+        return sb.toString()
+    }
+
+    @Suppress("UNCHECKED_CAST")
+    private fun valueToJson(v: Any?): String = when (v) {
+        null -> "null"
+        is Boolean -> v.toString()
+        is Double -> if (v == Math.floor(v) && !v.isInfinite()) v.toLong().toString() else v.toString()
+        is Long, is Int -> v.toString()
+        is Number -> {
+            val d = v.toDouble()
+            if (d == Math.floor(d) && !d.isInfinite()) d.toLong().toString() else d.toString()
+        }
+        is String -> jsonStringEscape(v)
+        is Map<*, *> -> {
+            val sorted = (v as Map<String, Any?>).toSortedMap()
+            canonicalMapToJson(sorted)
+        }
+        is List<*> -> "[${(v as List<Any?>).joinToString(",") { valueToJson(it) }}]"
+        else -> jsonStringEscape(v.toString())
+    }
+
+    /**
+     * 与 JavaScript JSON.stringify 完全一致的字符串转义：
+     * 转义 " \ \b \f \n \r \t 和 U+0000-U+001F 控制字符，
+     * 但【不转义 /】——org.json.JSONObject.quote() 会转义 / 为 \/，
+     * 与 JS 不一致，导致含 SDP 的 canonical 签名验证失败。
+     */
+    private fun jsonStringEscape(s: String): String {
+        val sb = StringBuilder("\"")
+        for (ch in s) {
+            when (ch) {
+                '"'  -> sb.append("\\\"")
+                '\\' -> sb.append("\\\\")
+                '\b' -> sb.append("\\b")
+                '\u000C' -> sb.append("\\f")
+                '\n' -> sb.append("\\n")
+                '\r' -> sb.append("\\r")
+                '\t' -> sb.append("\\t")
+                else -> if (ch.code < 0x20) {
+                    sb.append("\\u%04x".format(ch.code))
+                } else {
+                    sb.append(ch)
+                }
+            }
+        }
+        sb.append('"')
+        return sb.toString()
     }
 
     // 最近 5 分钟 nonce 缓存（防重放）
@@ -389,7 +474,10 @@ class SecureChatClient private constructor(private val context: Context) {
                 .url("${space.securechat.sdk.http.HttpClient.CORE_API_BASE}/api/v1/calls/ice-config")
                 .get()
                 .build()
-            val response = http.okhttpClient.newCall(request).execute()
+            // 切到 IO 线程执行同步网络请求，避免 NetworkOnMainThreadException
+            val response = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                http.okhttpClient.newCall(request).execute()
+            }
             if (!response.isSuccessful) return null
             val body = response.body?.string() ?: return null
             val moshi = com.squareup.moshi.Moshi.Builder()
